@@ -1,0 +1,29 @@
+[cam_0]
+name = "Camera_000_synchronized"
+size = [ 960, 544,]
+matrix = [ [ 479.70833713549234, 0.0, 479.5,], [ 0.0, 479.70833713549234, 271.5,], [ 0.0, 0.0, 1.0,],]
+distortions = [ 0.06392790179079012, 0.0, 0.0, 0.0, 0.0,]
+rotation = [ -0.022085973473400133, 0.005536921397454821, 0.05545486547316628,]
+translation = [ 0.0, 0.0, 0.0,]
+
+[cam_1]
+name = "Camera_001_synchronized"
+size = [ 960, 544,]
+matrix = [ [ 491.3265259522213, 0.0, 479.5,], [ 0.0, 491.3265259522213, 271.5,], [ 0.0, 0.0, 1.0,],]
+distortions = [ 0.0602436562270427, 0.0, 0.0, 0.0, 0.0,]
+rotation = [ -0.13790839727752974, -1.6633845809479977, -0.4609681979046993,]
+translation = [ 4547.663718675653, -1787.0774128622184, 6840.7388115308295,]
+
+[cam_2]
+name = "Camera_002_synchronized"
+size = [ 960, 544,]
+matrix = [ [ 502.773878890125, 0.0, 479.5,], [ 0.0, 502.773878890125, 271.5,], [ 0.0, 0.0, 1.0,],]
+distortions = [ 0.015818327378993025, 0.0, 0.0, 0.0, 0.0,]
+rotation = [ -0.09388087237433554, -0.8158812268568965, -0.24603368036433818,]
+translation = [ 4264.523564915251, -1088.8238965655503, 2428.4606478705114,]
+
+[metadata]
+charuco_square_size = 157.0
+charuco_board_object = "CharucoBoardDefinition(aruco_marker_dict=< cv2.aruco.Dictionary 0000029BC3D55730>, number_of_squares_width=7, number_of_squares_height=5, black_square_side_length=1, aruco_marker_length_proportional=0.8)"
+path_to_recorded_videos = "C:\\Users\\labPC\\OneDrive - University of Calgary\\Freemocap 2024\\recording_sessions\\session_2024-06-20_10_19_52\\recording_10_29_17_gmt-6_calibration\\synchronized_videos"
+date_time_calibrated = "2024-06-20T16:33:59"

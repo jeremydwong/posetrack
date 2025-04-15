@@ -1,0 +1,32 @@
+{
+    "mediapipe_parameters_model": {
+        "num_processes": 7,
+        "run_image_tracking": true,
+        "use_yolo_crop_method": false,
+        "mediapipe_model_complexity": 2,
+        "min_detection_confidence": 0.5,
+        "min_tracking_confidence": 0.5,
+        "static_image_mode": false,
+        "yolo_model_size": "nano",
+        "bounding_box_buffer_percentage": 10.0,
+        "buffer_size_method": "buffer_by_box_size"
+    },
+    "anipose_triangulate_3d_parameters_model": {
+        "run_reprojection_error_filtering": false,
+        "reprojection_error_confidence_cutoff": 90.0,
+        "minimum_cameras_to_reproject": 3,
+        "confidence_threshold_cutoff": 0.5,
+        "use_triangulate_ransac_method": false,
+        "run_3d_triangulation": true
+    },
+    "post_processing_parameters_model": {
+        "framerate": 30.0,
+        "butterworth_filter_parameters": {
+            "sampling_rate": 30.0,
+            "cutoff_frequency": 7.0,
+            "order": 4
+        },
+        "max_gap_to_fill": 10,
+        "run_butterworth_filter": true
+    }
+}
