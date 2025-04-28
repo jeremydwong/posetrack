@@ -9,9 +9,12 @@ from tqdm import tqdm
 import time
 import argparse
 import math # For distance calculation
+import pickle
 
-from sp_parse import parse_calibration_mwc, parse_calibration_fmc, calculate_projection_matrices, triangulate_keypoints
+from cs_parse import parse_calibration_mwc, parse_calibration_fmc, calculate_projection_matrices, triangulate_keypoints
 from pose_detector import load_models, detect_persons, estimate_poses, SynthPoseMarkers
+
+LOCAL_SP_DIR = "/Users/jeremy/Git/ProjectKeypointInference/models/synthpose/checkpoints"
 
 # --- Add the project_3d_to_2d helper function here or import it ---
 def project_3d_to_2d(point_3d, P):
@@ -26,7 +29,7 @@ def project_3d_to_2d(point_3d, P):
 
 def process_synced_frames(
     # ... (arguments remain the same) ...
-    csv_path, calibration_path, video_dir, output_path, model_dir="./checkpoints",
+    csv_path, calibration_path, video_dir, output_path, model_dir=LOCAL_SP_DIR,
     detector_dir=None, calib_type='mwc', skip_sync_indices=1, person_confidence=0.3,
     keypoint_confidence=0.1, device_name="auto",
     # --- Add tracking parameters ---
@@ -380,15 +383,16 @@ def process_synced_frames(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process synchronized multi-camera video for 3D pose estimation with tracking.")
     # (Add the new arguments if needed, or keep defaults)
-    parser.add_argument("--csv_path", default="test/caliscope/frame_time_history.csv",help="Path...")
-    parser.add_argument("--calibration_path",default="test/caliscope/config.toml", help="Path...")
-    parser.add_argument("--video_dir", default="test/caliscope", help="Dir...")
-    parser.add_argument("--output_path", default="test/caliscope/output_3d_poses_tracked.csv",help="Path...")
-    parser.add_argument("--model_dir", default="./checkpoints", help="Path...")
+    testfolder = "recording_3by1"
+    parser.add_argument("--csv_path", default=f"test/caliscope/{testfolder}/frame_time_history.csv",help="Path...")
+    parser.add_argument("--calibration_path",default=f"test/caliscope/{testfolder}/config.toml", help="Path...")
+    parser.add_argument("--video_dir", default=f"test/caliscope/{testfolder}", help="Dir...")
+    parser.add_argument("--output_path", default=f"output/caliscope/{testfolder}/output_3d_poses_tracked.csv",help="Path...")
+    parser.add_argument("--model_dir", default=LOCAL_SP_DIR, help="Path...")
     parser.add_argument("--detector_dir", default=None, help="Path...")
     parser.add_argument("--calib_type", default="mwc", choices=['mwc', 'fmc'], help="Type...")
     parser.add_argument("--skip", type=int, default=1, help="Skip N...")
-    parser.add_argument("--person_conf", type=float, default=0.3, help="Conf...")
+    parser.add_argument("--person_conf", type=float, default=0.8, help="Conf...")
     parser.add_argument("--keypoint_conf", type=float, default=0.1, help="Conf...")
     parser.add_argument("--device", default="auto", choices=['auto', 'cpu', 'mps', 'cuda'], help="Device...")
     parser.add_argument("--track_max_dist", type=float, default=100.0, help="Max 2D pixel distance for head tracking match (default: 100).")

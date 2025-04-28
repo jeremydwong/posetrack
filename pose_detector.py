@@ -18,6 +18,8 @@ import supervision as sv # Added for visualization types if needed later
 # Add near the top of process_synced_poses.py
 import pickle # Make sure pickle is imported
 
+LOCAL_SP_DIR = "/Users/jeremy/Git/ProjectKeypointInference/models/synthpose/checkpoints"
+
 # Define the markers directly or import SynthPoseMarkers class/dict
 class SynthPoseMarkers:
     markers = {
@@ -37,7 +39,7 @@ class SynthPoseMarkers:
     }
     num_markers = len(markers) # Should be 52
 
-def load_models(detect_path=None, pose_model_path="./checkpoints", device="cpu"):
+def load_models(detect_path=None, pose_model_path=LOCAL_SP_DIR, device="cpu"):
     """Loads the detection and pose estimation models."""
     print(f"Loading models to device: {device}")
 
@@ -99,8 +101,6 @@ import cv2 # Make sure cv2 is imported
 import numpy as np # Make sure numpy is imported
 import os # For creating directories
 
-# ... other imports ...
-
 def estimate_poses(
     image,
     person_boxes_coco,
@@ -124,17 +124,16 @@ def estimate_poses(
     with torch.no_grad():
         outputs = pose_model(**inputs)
 
-    # --- FIX: Adjust target_sizes for batch processing ---
+    # # --- FIX: Adjust target_sizes for batch processing ---
     num_persons = len(person_boxes_coco_list)
-    # Create a list with the original image size repeated for each person
-    corrected_target_sizes = [image.size[::-1]] * num_persons
-    # --- END FIX ---
+    # # Create a list with the original image size repeated for each person
+    # corrected_target_sizes = [image.size[::-1]] * num_persons
+    # # --- END FIX ---
 
 
     # --- Pass the CORRECTED target_sizes list ---
     pose_results = pose_image_processor.post_process_pose_estimation(
         outputs,
-        target_sizes=corrected_target_sizes, # Use the corrected list
         boxes=[person_boxes_coco_list]
     )
     # --- End Change ---
@@ -304,6 +303,7 @@ if __name__ == "__main__":
              # Display or save
              annotated_image = Image.fromarray(annotated_frame)
              annotated_image.show() # Display the image
+             print("Displaying annotated image.")
              # annotated_image.save("test/output_pose.png")
              print("Saved annotated image to test/output_pose.png")
         else:
