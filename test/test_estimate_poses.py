@@ -99,6 +99,11 @@ def run_verification(image_path, output_dir=os.path.join(path_to_project_root,"o
         person_scores = np.empty((0,), dtype=np.float32)
 
 
+    os.makedirs(output_dir, exist_ok=True)
+    # check if output_dir is not empty
+    if not os.listdir(output_dir):
+        output_filename = os.path.join(output_dir, f"verify_{os.path.basename(image_path)}")
+
     # --- 5. Estimate Poses ---
     # Only proceed if persons were detected
     all_keypoints = []
@@ -109,95 +114,17 @@ def run_verification(image_path, output_dir=os.path.join(path_to_project_root,"o
             # Make sure to pass the COCO boxes
             all_keypoints, all_keypoint_scores = estimate_poses(
                 image_pil, person_boxes_coco, pose_processor, pose_model, device,
-                debug_plot=True # Set to True and provide prefix if needed
-                # debug_save_prefix=os.path.join(output_dir, "debug_pose_estimate")
-            )
+                debug_plot=True, 
+                debug_save_prefix = output_dir)
             print(f"Estimated poses for {len(all_keypoints)} persons.")
-            if all_keypoints:
-                # Check the structure and values of the first keypoint set
-                print(f"  Example keypoints shape (first person): {all_keypoints[0].shape if all_keypoints else 'N/A'}")
-                print(f"  Example keypoints values (first person, first 5 points): \n{all_keypoints[0][:5] if all_keypoints else 'N/A'}")
-                print(f"  Example scores shape (first person): {all_keypoint_scores[0].shape if all_keypoint_scores else 'N/A'}")
-                print(f"  Example scores values (first person, first 5 points): {all_keypoint_scores[0][:5] if all_keypoint_scores else 'N/A'}")
-
-                # ---------> DEBUGGING FOCUS <---------
-                # Check for NaN or unexpected large/small values here
-                if all_keypoints and np.isnan(all_keypoints[0]).any():
-                    print("!!!!!! WARNING: NaN values detected in the first person's keypoints !!!!!")
-
-                if isinstance(all_keypoints, list) and all_keypoints:
-                    # Assuming all_keypoints is a list of numpy arrays, we can visualize them
-                    xy = torch.stack([pose_result['keypoints'] for pose_result in all_keypoints]).cpu().numpy()
-                    scores = torch.stack([pose_result['scores'] for pose_result in all_keypoint_scores]).cpu().numpy()
-                    key_points = sv.KeyPoints(xy=xy, confidence=scores)
-
-                    vertex_annotator = sv.VertexAnnotator(
-                        color=sv.Color.RED,
-                        radius=2
-                    )
-
-                    annotated_frame = vertex_annotator.annotate(
-                        scene=image_pil.copy(),
-                        key_points=key_points
-                    )
-                    annotated_frame.show()
-                    print("Keypoints visualized successfully.")
-                else:   
-                    print("Warning: all_keypoints is not a list or is empty. No keypoints to visualize.")
-            
-
-            else:
-                print("No keypoints detected. Skipping visualization.")
-        except Exception as e:
-            print(f"Error during pose estimation: {e}")
-
-
-                # assume it is a list of numpy arrays. loop across and add to image.
-
-                # image_pose_result = pose_results[0]  # results for first image
-                # key_points = sv.KeyPoints(
-                #     xy=all_keypoints, confidence=all_keypoint_scores)
-
-                # vertex_annotator = sv.VertexAnnotator(
-                #     color=sv.Color.RED,
-                #     radius=2
-                # )
-
-                # annotated_frame = vertex_annotator.annotate(
-                #     scene=image.copy(),
-                #     key_points=key_points
-                # )
-                # annotated_frame.show()
-
+                    
         except Exception as e:
             print(f"Error during pose estimation: {e}")
             all_keypoints = [] # Ensure lists are empty on error
             all_keypoint_scores = []
-
-    # --- 6. Visualize Results (using Supervision) ---
-    
-    
-
-
-    if save_result or show_result:
-
-        if save_result:
-            os.makedirs(output_dir, exist_ok=True)
-            output_filename = os.path.join(output_dir, f"verify_{os.path.basename(image_path)}")
-            # print out the output filename for clarity
-            print(f"Output filename: {output_filename}")
-            try:
-                annotated_image.save(output_filename)
-                print(f"Saved annotated image to: {output_filename}")
-            except Exception as e:
-                print(f"Error saving annotated image: {e}")
-
-        if show_result:
-            print("Displaying annotated image...")
             
-
     print("Verification script finished.")
-    return annotated_image # Return for potential further use/testing
+
 
 # --- Command Line Argument Parsing ---
 if __name__ == "__main__":

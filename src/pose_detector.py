@@ -196,6 +196,7 @@ def estimate_poses(
     # --- Debugging Visualization ---
     # (Keep the plotting code as is)
     if debug_plot or debug_save_prefix and len(all_keypoints) > 0:
+        print("Debugging visualization enabled. Plotting keypoints and boxes...")
         try:
             frame_bgr = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
             box_color = (0, 255, 0); kp_color_high_conf = (255, 0, 0); kp_color_low_conf = (0, 0, 255); text_color = (255, 255, 255)
@@ -208,7 +209,7 @@ def estimate_poses(
             else:
                  num_to_plot = len(all_keypoints)
 
-
+            
             for i in range(num_to_plot):
                 box_coco = person_boxes_coco[i]
                 x1, y1, w, h = map(int, box_coco)
@@ -227,23 +228,23 @@ def estimate_poses(
                     kp_color = kp_color_high_conf if conf >= 0.3 else kp_color_low_conf
                     cv2.circle(frame_bgr, (kx, ky), 3, kp_color, -1)
 
-            output_filename = f"{debug_save_prefix}_pose_debug.png"
-            os.makedirs(os.path.dirname(debug_save_prefix), exist_ok=True)
-            cv2.imwrite(output_filename, frame_bgr)
+            # show it!
+            cv2.imshow("Pose Estimation Debug", frame_bgr)
+            cv2.waitKey(0)  # Wait for a key press to close the window
+
+            if debug_save_prefix is not None:
+                output_filename = os.path.join(debug_save_prefix,"pose_debug.png")
+                os.makedirs(os.path.dirname(debug_save_prefix), exist_ok=True)
+                cv2.imwrite(output_filename, frame_bgr)
+            
+            cv2.destroyAllWindows()
 
         except Exception as e:
             print(f"Error during debug plotting in estimate_poses: {e}")
     # --- End Debugging Visualization ---
-
     return all_keypoints, all_keypoint_scores
 
-
-# --- Keep the visualization part from test.py if needed for debugging ---
-# def draw_poses(image, person_boxes_voc, all_keypoints, all_keypoint_scores):
-#     # ... (visualization code using supervision or cv2) ...
-#     pass
-
-# --- Example Usage (similar to the original test.py) ---
+# Test script to verify the pose detection functionality
 if __name__ == "__main__":
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     if device == "mps" and not torch.backends.mps.is_built():
@@ -312,5 +313,3 @@ if __name__ == "__main__":
         else:
             print("Warning: Could not format keypoints for supervision visualization.")
             print(f"xy shape: {xy.shape}, confidence shape: {confidence.shape}")
-
-# --- END OF FILE pose_detector.py ---
