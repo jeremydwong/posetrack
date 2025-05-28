@@ -12,7 +12,7 @@ import math # For distance calculation
 import pickle
 
 from cs_parse import parse_calibration_mwc, parse_calibration_fmc, calculate_projection_matrices, triangulate_keypoints
-from pose_detector import load_models, detect_persons, estimate_poses, SynthPoseMarkers
+from pose_detector import load_models, detect_persons, estimate_poses, SynthPoseMarkers, LOCAL_DET_DIR, LOCAL_SP_DIR
 
 # --- Add the project_3d_to_2d helper function here or import it ---
 def project_3d_to_2d(point_3d, P):
@@ -25,10 +25,10 @@ def project_3d_to_2d(point_3d, P):
     return point_2d.flatten()
 # ---
 
-def process_synced_frames(
+def process_synced_mwc_frames(
     # ... (arguments remain the same) ...
     csv_path, calibration_path, video_dir, output_path, model_dir=LOCAL_SP_DIR,
-    detector_dir=None, calib_type='mwc', skip_sync_indices=1, person_confidence=0.3,
+    detector_dir=LOCAL_DET_DIR, calib_type='mwc', skip_sync_indices=1, person_confidence=0.3,
     keypoint_confidence=0.1, device_name="auto",
     # --- Add tracking parameters ---
     tracking_max_2d_dist=100, # Max pixels distance for head matching in 2D
@@ -387,21 +387,20 @@ if __name__ == "__main__":
     parser.add_argument("--video_dir", default=f"test/caliscope/{testfolder}", help="Dir...")
     parser.add_argument("--output_path", default=f"output/caliscope/{testfolder}/output_3d_poses_tracked.csv",help="Path...")
     parser.add_argument("--model_dir", default=LOCAL_SP_DIR, help="Path...")
-    parser.add_argument("--detector_dir", default=None, help="Path...")
+    parser.add_argument("--detector_dir", default=LOCAL_DET_DIR, help="Path...")
     parser.add_argument("--calib_type", default="mwc", choices=['mwc', 'fmc'], help="Type...")
     parser.add_argument("--skip", type=int, default=1, help="Skip N...")
     parser.add_argument("--person_conf", type=float, default=0.8, help="Conf...")
     parser.add_argument("--keypoint_conf", type=float, default=0.1, help="Conf...")
-    parser.add_argument("--device", default="auto", choices=['auto', 'cpu', 'mps', 'cuda'], help="Device...")
+    parser.add_argument("--device", default="mps", choices=['auto', 'cpu', 'mps', 'cuda'], help="Device...")
     parser.add_argument("--track_max_dist", type=float, default=100.0, help="Max 2D pixel distance for head tracking match (default: 100).")
     parser.add_argument("--head_idx", type=int, default=0, help="Index of keypoint used for tracking (default: 0, Nose).")
 
-
     args = parser.parse_args()
-    process_synced_frames(
+
+    process_synced_mwc_frames(
         csv_path=args.csv_path, calibration_path=args.calibration_path, video_dir=args.video_dir,
         output_path=args.output_path, model_dir=args.model_dir, detector_dir=args.detector_dir,
         calib_type=args.calib_type, skip_sync_indices=args.skip, person_confidence=args.person_conf,
         keypoint_confidence=args.keypoint_conf, device_name=args.device,
-        tracking_max_2d_dist=args.track_max_dist, head_kp_index=args.head_idx # Pass tracking params
-    )
+        tracking_max_2d_dist=args.track_max_dist, head_kp_index=args.head_idx)

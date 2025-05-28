@@ -12,14 +12,11 @@ import time
 from tqdm import tqdm
 import supervision as sv # Added for visualization types if needed later
 import pickle # for saving/loading models / results
-
-# define static list of synthpose markers
-# probably don't need a class, just static dict
       
 LOCAL_SP_DIR    = "/Users/jeremy/Git/KeypointInference/models/synthpose/checkpoints"
 LOCAL_DET_DIR   = "/Users/jeremy/Git/KeypointInference/models/rtdetr_r50vd_coco_o365/checkpoints"
 
-# Define the markers directly or import SynthPoseMarkers class/dict
+# Define the markers directly here. we could rewrite these names, since they become the keys in the dictionary.
 class SynthPoseMarkers:
     markers = {
         0: "Nose", 1: "L_Eye", 2: "R_Eye", 3: "L_Ear", 4: "R_Ear",
@@ -127,19 +124,14 @@ def estimate_poses(
     with torch.no_grad():
         outputs = pose_model(**inputs)
 
-    # # --- FIX: Adjust target_sizes for batch processing ---
+    
     num_persons = len(person_boxes_coco_list)
     # # Create a list with the original image size repeated for each person
-    # corrected_target_sizes = [image.size[::-1]] * num_persons
-    # # --- END FIX ---
-
-
-    # --- Pass the CORRECTED target_sizes list ---
+    
     pose_results = pose_image_processor.post_process_pose_estimation(
         outputs,
         boxes=[person_boxes_coco_list]
     )
-    # --- End Change ---
 
     # post_process_pose_estimation should still return a list per original image.
     # Since we passed one image, pose_results should be a list of length 1.
@@ -233,7 +225,7 @@ def estimate_poses(
             cv2.waitKey(0)  # Wait for a key press to close the window
 
             if debug_save_prefix is not None:
-                output_filename = os.path.join(debug_save_prefix,"pose_debug.png")
+                output_filename = os.path.join(debug_save_prefix,"pose.png")
                 os.makedirs(os.path.dirname(debug_save_prefix), exist_ok=True)
                 cv2.imwrite(output_filename, frame_bgr)
             

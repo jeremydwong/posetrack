@@ -393,9 +393,10 @@ def triangulate_keypoints(
 
 if __name__ == "__main__":
     # set default filenames to be in test directory
-    test_dir = os.path.dirname(__file__)
-    mwc_file = os.path.join(test_dir, 'test','test_mwc_config.toml')
-    fmc_file = os.path.join(test_dir, 'test','fmc','calibration','calibration.toml')
+    test_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    test_dir = os.path.join(test_dir, 'test','calibration')
+    mwc_file = os.path.join(test_dir, 'test_mwc_config.toml')
+    fmc_file = os.path.join(test_dir, 'test_fmc_recording_calibration.toml')
     # parse the MWC and FMC files
     camera_params = parse_calibration_mwc(mwc_file)
     fmc_camera_params = parse_calibration_fmc(fmc_file)
@@ -407,7 +408,61 @@ if __name__ == "__main__":
     for i, params in enumerate(fmc_camera_params):
         print(f"Camera {i}: {params}")
 
-    
+    # Load camera_params from snapshot_*.pkl files and compare with current ones
+    import pickle
+
+    mwc_snapshot_path = os.path.join(test_dir, 'snapshot_camera_params_mwc.pkl')
+    fmc_snapshot_path = os.path.join(test_dir, 'snapshot_camera_params_fmc.pkl')
+
+    try:
+        with open(mwc_snapshot_path, 'rb') as f:
+            camera_params_snapshot = pickle.load(f)
+        with open(fmc_snapshot_path, 'rb') as f:
+            fmc_camera_params_snapshot = pickle.load(f)
+    except FileNotFoundError as e:
+        print(f"Snapshot file not found: {e}")
+        camera_params_snapshot = None
+        fmc_camera_params_snapshot = None
+
+    def compare_camera_params(a, b):
+        if type(a) != type(b):
+            return False
+        if isinstance(a, dict):
+            if set(a.keys()) != set(b.keys()):
+                return False
+            for k in a:
+                if not compare_camera_params(a[k], b[k]):
+                    return False
+            return True
+        if isinstance(a, list):
+            if len(a) != len(b):
+                return False
+            for x, y in zip(a, b):
+                if not compare_camera_params(x, y):
+                    return False
+            return True
+        if isinstance(a, np.ndarray):
+            return np.allclose(a, b)
+        return a == b
+
+    if camera_params_snapshot is not None:
+        mwc_equal = compare_camera_params(camera_params, camera_params_snapshot)
+        print(f"MWC camera_params equal to snapshot: {mwc_equal}")
+    else:
+        print("MWC snapshot not loaded; skipping comparison.")
+
+    if fmc_camera_params_snapshot is not None:
+        fmc_equal = compare_camera_params(fmc_camera_params, fmc_camera_params_snapshot)
+        print(f"FMC camera_params equal to snapshot: {fmc_equal}")
+    else:
+        print("FMC snapshot not loaded; skipping comparison.")
+
+    # --- Add assert checks at the end ---
+    if camera_params_snapshot is not None:
+        assert mwc_equal, "Parsed MWC camera_params do not match the snapshot!"
+    if fmc_camera_params_snapshot is not None:
+        assert fmc_equal, "Parsed FMC camera_params do not match the snapshot!"
+        
     # Example: Calculating projection matrices for the FMC data
     if fmc_camera_params:
         projection_matrices_fmc = []
@@ -423,68 +478,3 @@ if __name__ == "__main__":
         # print(projection_matrices_fmc[0]) # Print first one as example
     else:
         print("\nNo FMC camera parameters were parsed to calculate projection matrices.")
-
-    ######## end update. ########
-    # for caliscope:
-    # sync frame information
-    # sync_index port_number frame_index
-    # not sure why sync/frame start so high. but anyway, 
-    # - read in the videofiles
-    # - go according to sync_index i guess. maybe each frame actually has some frame count stored in the .mp4. 
-    # - process each frame
-    # - should investigate what synthpose needs for each processing step. 
-    # - should buy that laptop. 
-    ### annoying: individual camera serial number. 
-    # 
-    # Perform triangulation
-    # world_points = triangulate_keypoints(detected_keypoints, camera_params, projection_matrices)
-
-    # print("\nTriangulated 3D Points (in World Coordinates):")
-    # for i, p3d in enumerate(world_points):
-    #     if p3d is not None:
-    #         # The units will be the same as the units used for the translation vectors
-    #         # (likely millimeters if charuco_square_size=157.0 was in mm during calibration)
-    #         print(f"Keypoint {i}: X={p3d[0]:.2f}, Y={p3d[1]:.2f}, Z={p3d[2]:.2f}")
-    #     else:
-    #         print(f"Keypoint {i}: Triangulation failed (missing/invalid input).")
-
-
-# Explanation:
-
-# Parsing: The parse_calibration_data function reads the multi-line string, identifies camera blocks, and extracts the parameters. It uses regular expressions and eval (use with caution, assumes input is safe) to convert the string representations of lists into NumPy arrays. Basic validation is included.
-
-# Projection Matrices: It iterates through the parsed camera parameters. For each camera:
-
-# It gets the intrinsic matrix K.
-
-# It converts the rotation vector rvec into a 3x3 rotation matrix R using cv2.Rodrigues.
-
-# It takes the translation vector tvec (ensuring it's a column vector).
-
-# It forms the 3x4 extrinsic matrix [R | t] using np.hstack.
-
-# It calculates the 3x4 projection matrix P = K @ [R | t].
-
-# triangulate_keypoints Function:
-
-# Takes the list of detected keypoints (structured as described in the docstring), the parsed camera parameters (needed for undistortion), and the calculated projection matrices.
-
-# Iterates through each keypoint set (kp_views).
-
-# For each keypoint, it iterates through the camera views (cam_idx).
-
-# Undistortion: It takes the 2D point, reshapes it for cv2.undistortPoints, and calls the function with the camera's K and dist coefficients. P=K ensures the output coordinates are still in pixels but corrected.
-
-# Multi-View Triangulation (SVD): It constructs the A matrix for the linear system AX = 0, where X is the homogeneous 3D point [X, Y, Z, W]. Each camera view adds two rows to this matrix based on its projection matrix P and the undistorted 2D point (x, y).
-
-# It solves AX = 0 using np.linalg.svd. The solution corresponds to the singular vector associated with the smallest singular value, which is the last row of Vh (or the last column of V).
-
-# Homogeneous to Cartesian: It converts the 4D homogeneous point point_4d_hom_svd to 3D Cartesian coordinates by dividing the first three elements by the fourth (W).
-
-# Handles potential missing/invalid (None or NaN) input points for robustness.
-
-# Example Usage: Shows how to structure your detected detected_keypoints list and how to call the triangulation function.
-
-# Output: Prints the calculated 3D coordinates for each keypoint. The coordinate system will be the "world" coordinate system defined during calibration. Since cam_0 has zero translation and near-zero rotation, the world coordinate system is effectively centered at cam_0. The units of the 3D points will match the units of the translation vectors provided in the calibration data (e.g., millimeters if the calibration target size was specified in mm).
-
-# This code provides a complete pipeline from your calibration data and 2D detections to 3D world coordinates using robust multi-view triangulation.

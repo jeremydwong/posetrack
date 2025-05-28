@@ -1,3 +1,5 @@
+# test_estimate_poses.py: tests pose_detector.estimate_poses().
+# this depends on load_models() and detect_persons().
 import torch
 import numpy as np
 import cv2 # Needed for visualization if using cv2 directly, or by supervision
@@ -6,21 +8,23 @@ import os
 import argparse
 import supervision as sv # For visualization consistency with original test/pose_detector
 
-# Import the refactored functions from pose_detector.py
+# Ensure the src directory is in the Python path for imports
 import sys
 import os
 path_to_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, path_to_project_root)
 
+
+# Import the refactored functions from pose_detector.py
 from src.pose_detector import (
     load_models,
     detect_persons,
     estimate_poses,
-    LOCAL_SP_DIR # Import the constant if needed for default paths
-)
+    LOCAL_SP_DIR, 
+    LOCAL_DET_DIR)
 
 def run_verification(image_path, output_dir=os.path.join(path_to_project_root,"output/output_verify"), device_name="auto",
-                     detector_dir=None, pose_model_dir=LOCAL_SP_DIR,
+                     detector_dir=LOCAL_DET_DIR, pose_model_dir=LOCAL_SP_DIR,
                      person_conf=0.3, show_result=True, save_result=True):
     """
     Runs the pose detection pipeline using refactored functions and visualizes.
@@ -35,6 +39,13 @@ def run_verification(image_path, output_dir=os.path.join(path_to_project_root,"o
         show_result (bool): Whether to display the annotated image.
         save_result (bool): Whether to save the annotated image.
     """
+    # there are 5 parts:
+    # 1. Setup device for cpu, mps or cuda. 
+    # 2. Load models
+    # 3. Load image
+    # 4. Detect persons
+    # 5. Estimate poses
+    print("Starting verification script...")
 
     # --- 1. Setup Device ---
     if device_name == "auto":
@@ -105,10 +116,9 @@ def run_verification(image_path, output_dir=os.path.join(path_to_project_root,"o
         output_filename = os.path.join(output_dir, f"verify_{os.path.basename(image_path)}")
 
     # --- 5. Estimate Poses ---
-    # Only proceed if persons were detected
     all_keypoints = []
     all_keypoint_scores = []
-    if len(person_boxes_coco) > 0:
+    if len(person_boxes_coco) > 0: # Only proceed if persons were detected
         print("Estimating poses using pose_detector.estimate_poses...")
         try:
             # Make sure to pass the COCO boxes
@@ -116,14 +126,35 @@ def run_verification(image_path, output_dir=os.path.join(path_to_project_root,"o
                 image_pil, person_boxes_coco, pose_processor, pose_model, device,
                 debug_plot=True, 
                 debug_save_prefix = output_dir)
-            print(f"Estimated poses for {len(all_keypoints)} persons.")
-                    
+            print(f"Estimated poses for {len(all_keypoints)} persons.") 
+            #save all_keypoints using pickle, to be compared with during testing with assertions
+            import pickle
+            with open(os.path.join(output_dir, 'all_keypoints.pkl'), 'wb') as f:
+                pickle.dump(all_keypoints, f)
+            
         except Exception as e:
             print(f"Error during pose estimation: {e}")
             all_keypoints = [] # Ensure lists are empty on error
             all_keypoint_scores = []
-            
-    print("Verification script finished.")
+
+    # compare all_keypoints with the expected output
+    # parse the image filename as the filenam and the directory
+    image_filename = os.path.basename(image_path).split('.')[0]  # Get filename without extension
+    image_dir = os.path.dirname(image_path)
+    all_keypoints_reference = os.path.join(image_dir, f'keypoints_{image_filename}.pkl')
+    # load the pkl file
+    all_keypoints_ref = pickle.load(open(all_keypoints_reference, 'rb')) if os.path.exists(all_keypoints_reference) else None
+
+    # compare the all_keypoints_ref with the all_keypoints with assert
+    try:
+        assert len(all_keypoints) == len(all_keypoints_ref), "Number of detected poses does not match reference."
+        for i in range(len(all_keypoints)):
+            assert np.allclose(all_keypoints[i], all_keypoints_ref[i], atol=1e-5), f"Pose {i} does not match reference."
+        print("TEST KEYPOINTS MATCH: PASSED. All expected keypoints within 1e-5 of the 2025-05-27 run.")
+    except FileNotFoundError:
+        print(f"Reference keypoints file not found: {all_keypoints_reference}")
+    except AssertionError as e:
+        print(f"Assertion error: {e}")
 
 
 # --- Command Line Argument Parsing ---
@@ -132,10 +163,10 @@ if __name__ == "__main__":
 
     # Use paths relative to the project structure assumed
     # Adjust these defaults if your structure is different
-    parser.add_argument("--image", default="test/image/chanel.png", help="Path to the input image.")
+    parser.add_argument("--image", default="test/image/1.png", help="Path to the input image.")
     parser.add_argument("--output_dir", default=os.path.join(path_to_project_root,"output/output_verify"), help="Directory to save the output annotated image.")
     parser.add_argument("--pose_model", default=LOCAL_SP_DIR, help="Path to the local SynthPose model directory.")
-    parser.add_argument("--detector_model", default=None, help="Path to the local RT-DETR model directory (optional, uses HF if None).")
+    parser.add_argument("--detector_model", default=LOCAL_DET_DIR, help="Path to the local RT-DETR model directory (optional, uses HF if None).")
     parser.add_argument("--device", default="mps", choices=['auto', 'cpu', 'mps', 'cuda'], help="Computation device.")
     parser.add_argument("--person_conf", type=float, default=0.3, help="Confidence threshold for person detection.")
     parser.add_argument("--hide", action="store_true", help="Do not display the annotated image.")
@@ -145,6 +176,17 @@ if __name__ == "__main__":
 
     run_verification(
         image_path=args.image,
+        output_dir=args.output_dir,
+        device_name=args.device,
+        detector_dir=args.detector_model,
+        pose_model_dir=args.pose_model,
+        person_conf=args.person_conf,
+        show_result=True,
+        save_result=not args.no_save
+    )
+    
+    run_verification(
+        image_path="test/image/many.png",
         output_dir=args.output_dir,
         device_name=args.device,
         detector_dir=args.detector_model,
