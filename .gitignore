@@ -26,7 +26,9 @@ share/python-wheels/
 *.egg
 MANIFEST
 
+#apple
 .DS_Store
+*/.DS_Store
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
