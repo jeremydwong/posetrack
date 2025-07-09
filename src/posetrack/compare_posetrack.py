@@ -55,11 +55,11 @@ right_foot_new = np.stack([
 ], axis=1)
 
 # rotate with R
-left_foot_new_rotated = (left_foot_new.T@r).T
-right_foot_new_rotated = (right_foot_new.T@r).T
+left_foot_new_rotated = (r@left_foot_new.T).T
+right_foot_new_rotated = (r@right_foot_new.T).T
 
-left_foot_orig_rotated = (left_foot_orig.T@r).T
-right_foot_orig_rotated = (right_foot_orig.T@r).T
+left_foot_orig_rotated = (r@left_foot_orig.T).T
+right_foot_orig_rotated = (r@right_foot_orig.T).T
 
 plt.plot(right_foot_orig_rotated[:, 0:3], 'r-', label='Original Right Foot')
 plt.plot(left_foot_orig_rotated[:, 0:3], 'b-', label='Original Left Foot')

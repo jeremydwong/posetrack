@@ -1737,9 +1737,9 @@ def animate_multi_person_results(results_directory, output_plot_path=None):
     ax_3d.set_title('3D Pose Visualization')
     
     # Set fixed axis limits
-    ax_3d.set_xlim([-5, 5])
-    ax_3d.set_ylim([-5, 5])
-    ax_3d.set_zlim([-5, 5])
+    ax_3d.set_xlim([-2.5, 2.5])
+    ax_3d.set_ylim([-2.5, 2.5])
+    ax_3d.set_zlim([-2.5, 2.5])
     
     # Initialize 3D scatter plots for each person with dummy data
     person_scatters = {}
@@ -1750,8 +1750,9 @@ def animate_multi_person_results(results_directory, output_plot_path=None):
     ax_3d.legend()
     
     # Animation state
-    current_sync_idx = 0
+    current_sync_idx_index = 0  # Index into all_sync_indices array
     is_playing = False
+    animation_timer = None
     
     def update_frame(current_sync_index):
         """Update the 3D visualization for a given sync index."""
@@ -1826,34 +1827,57 @@ def animate_multi_person_results(results_directory, output_plot_path=None):
     
     def on_slider_change(val):
         """Handle slider changes."""
-        nonlocal current_sync_idx, is_playing
-        current_sync_idx = int(val)
-        is_playing = False  # Stop auto-play when user interacts
-        update_frame(current_sync_idx)  # val is now actual sync_index
+        nonlocal current_sync_idx_index, is_playing, animation_timer
+        current_sync_value = int(val)
+        # Find index in all_sync_indices that corresponds to this sync_index value
+        try:
+            current_sync_idx_index = all_sync_indices.index(current_sync_value)
+        except ValueError:
+            # Find closest sync_index
+            current_sync_idx_index = min(range(len(all_sync_indices)), 
+                                        key=lambda i: abs(all_sync_indices[i] - current_sync_value))
+        
+        # Stop animation when user interacts with slider
+        if is_playing and animation_timer:
+            animation_timer.stop()
+            is_playing = False
+            play_button.label.set_text('Play')
+        
+        update_frame(current_sync_value)
     
     def on_play_button(event):
         """Handle play button clicks."""
-        nonlocal is_playing, current_sync_idx
+        nonlocal is_playing, current_sync_idx_index, animation_timer
         is_playing = not is_playing
+        
         if is_playing:
             play_button.label.set_text('Pause')
-            # Simple loop for playback
-            import threading
-            def play_loop():
-                sync_idx_iter = 0
-                while is_playing:
-                    if sync_idx_iter >= len(all_sync_indices):
-                        sync_idx_iter = 0  # Loop back to start
-                    current_sync_index = all_sync_indices[sync_idx_iter]
-                    update_frame(current_sync_index)
-                    slider.set_val(current_sync_index)
-                    current_sync_idx = current_sync_index
-                    sync_idx_iter += 1
-                    plt.pause(0.1)  # 100ms delay
-                play_button.label.set_text('Play')
-            threading.Thread(target=play_loop, daemon=True).start()
+            # Start timer-based animation
+            animation_timer = fig.canvas.new_timer(interval=100)  # 100ms = 10 FPS
+            animation_timer.add_callback(animate_step)
+            animation_timer.start()
         else:
             play_button.label.set_text('Play')
+            # Stop timer
+            if animation_timer:
+                animation_timer.stop()
+    
+    def animate_step():
+        """Single animation step called by timer."""
+        nonlocal current_sync_idx_index, is_playing
+        
+        if not is_playing:
+            return
+        
+        # Move to next frame
+        current_sync_idx_index += 1
+        if current_sync_idx_index >= len(all_sync_indices):
+            current_sync_idx_index = 0  # Loop back to start
+        
+        # Get current sync_index value and update display
+        current_sync_value = all_sync_indices[current_sync_idx_index]
+        slider.set_val(current_sync_value)
+        update_frame(current_sync_value)
     
     # Create slider - use actual sync_index values, not frame indices
     slider_ax = plt.axes([0.1, 0.02, 0.6, 0.03])
