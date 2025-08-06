@@ -27,7 +27,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     process_synced_mwc_frames(
-        csv_path=args.csv_path, calibration_path=args.calibration_path, video_dir=args.video_dir,
+        frame_history_csv_path=args.csv_path, calibration_path=args.calibration_path, video_dir=args.video_dir,
         output_path=args.output_path, model_dir=args.model_dir, detector_dir=args.detector_dir,
         calib_type=args.calib_type, skip_sync_indices=args.skip, person_confidence=args.person_conf,
         keypoint_confidence=args.keypoint_conf, device_name=args.device,

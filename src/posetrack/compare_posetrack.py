@@ -61,10 +61,17 @@ right_foot_new_rotated = (r@right_foot_new.T).T
 left_foot_orig_rotated = (r@left_foot_orig.T).T
 right_foot_orig_rotated = (r@right_foot_orig.T).T
 
+import matplotlib.pyplot as plt
+min_len = min(left_foot_orig_rotated.shape[0], left_foot_new_rotated.shape[0])
+
+left_foot_orig_rotated = left_foot_orig_rotated[-min_len:]
+right_foot_orig_rotated = right_foot_orig_rotated[-min_len:]
+left_foot_new_rotated = left_foot_new_rotated[-min_len:]
+right_foot_new_rotated = right_foot_new_rotated[-min_len:]
 plt.plot(right_foot_orig_rotated[:, 0:3], 'r-', label='Original Right Foot')
 plt.plot(left_foot_orig_rotated[:, 0:3], 'b-', label='Original Left Foot')
 plt.plot(right_foot_new_rotated[:, 0:3], 'r.-', label='New Right Foot')
 plt.plot(left_foot_new_rotated[:, 0:3], 'b.-', label='New Left Foot')
 
 plt.legend()
-plt.show()
+plt.show(block=True)

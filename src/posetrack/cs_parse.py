@@ -286,7 +286,8 @@ def triangulate_keypoints(
     person_kp_dict,    # Dict: {port: keypoints_array (17, 2 or 3)}
     port_to_cam_index, # Dict: mapping port number to index in camera_params/proj_matrices
     camera_params,     # List of camera parameter dicts
-    projection_matrices # List of 3x4 projection matrices
+    projection_matrices, # List of 3x4 projection matrices
+    confidence_threshold=0.1
     ):
     """
     Triangulates 3D points for a single person from 2D keypoints detected
@@ -344,7 +345,7 @@ def triangulate_keypoints(
                  point_2d_raw = np.array(kp_data[:2], dtype=np.float32).reshape(1, 1, 2)
                  # Optional: Check confidence if available (index 2)
                  confidence = kp_data[2] if len(kp_data) > 2 else 1.0
-                 if np.isnan(point_2d_raw).any() or confidence < 0.1: # Add confidence threshold if needed
+                 if np.isnan(point_2d_raw).any() or confidence < confidence_threshold:
                      # print(f"Debug: Invalid/low confidence KP {kp_idx} in port {port}. Skipping view.")
                      continue # Skip this view for this specific keypoint
             else:

@@ -236,6 +236,186 @@ def estimate_poses(
     # --- End Debugging Visualization ---
     return all_keypoints, all_keypoint_scores
 
+def detect_persons_batch(images, person_image_processor, person_model, device, confidence_threshold=0.3, batch_size=8):
+    """Batch detects persons in multiple PIL Images with debugging."""
+    import time
+    
+    batch_results = []
+    
+    # DEBUG: Time single image processing
+    if len(images) > 0:
+        start_time = time.time()
+        single_inputs = person_image_processor(images=images[0], return_tensors="pt").to(device)
+        with torch.no_grad():
+            _ = person_model(**single_inputs)
+        single_time = time.time() - start_time
+        print(f"DEBUG: Single image processing time: {single_time:.4f}s")
+    
+    # Process images in batches
+    for i in range(0, len(images), batch_size):
+        batch_images = images[i:i + batch_size]
+        actual_batch_size = len(batch_images)
+        
+        # DEBUG: Time batch processing
+        start_time = time.time()
+        
+        # Prepare batch inputs
+        inputs = person_image_processor(images=batch_images, return_tensors="pt").to(device)
+        target_sizes = torch.tensor([img.size[::-1] for img in batch_images])
+        
+        # DEBUG: Check if we're actually batching
+        print(f"DEBUG: Input tensor shape: {inputs['pixel_values'].shape}")
+        print(f"DEBUG: Expected batch dimension: {actual_batch_size}")
+        
+        with torch.no_grad():
+            outputs = person_model(**inputs)
+        
+        batch_time = time.time() - start_time
+        print(f"DEBUG: Batch of {actual_batch_size} images time: {batch_time:.4f}s")
+        print(f"DEBUG: Time per image in batch: {batch_time/actual_batch_size:.4f}s")
+        
+        # Post-process batch results
+        results = person_image_processor.post_process_object_detection(
+            outputs, target_sizes=target_sizes, threshold=confidence_threshold
+        )
+        
+        # Process each image result in the batch
+        for result in results:
+            person_labels_mask = (result["labels"] == 0)  # COCO index for person is 0
+            person_boxes_voc = result["boxes"][person_labels_mask]
+            person_scores = result["scores"][person_labels_mask]
+            
+            # --- FIX: Ensure NumPy array return, even if empty ---
+            if len(person_boxes_voc) == 0:
+                # Return empty NumPy arrays with appropriate shape hint if possible
+                batch_results.append((
+                    np.empty((0, 4), dtype=np.float32),
+                    np.empty((0, 4), dtype=np.float32),
+                    np.empty((0,), dtype=np.float32)
+                ))
+                continue
+                
+            person_boxes_voc = person_boxes_voc.cpu().numpy()
+            person_scores = person_scores.cpu().numpy()
+            
+            # Convert boxes from VOC (x1, y1, x2, y2) to COCO (x1, y1, w, h)
+            person_boxes_coco = person_boxes_voc.copy()
+            person_boxes_coco[:, 2] = person_boxes_coco[:, 2] - person_boxes_coco[:, 0]  # w = x2 - x1
+            person_boxes_coco[:, 3] = person_boxes_coco[:, 3] - person_boxes_coco[:, 1]  # h = y2 - y1
+            # --- END FIX ---
+            
+            batch_results.append((person_boxes_voc, person_boxes_coco, person_scores))
+    
+    return batch_results
+
+
+def estimate_poses_batch(images_with_boxes, pose_image_processor, pose_model, device, batch_size=8):
+    """
+    Batch estimates poses for given images and their person bounding boxes.
+    
+    Args:
+        images_with_boxes: List of tuples (image, person_boxes_coco)
+        pose_image_processor: The pose processor
+        pose_model: The pose model
+        device: Device to run on
+        batch_size: Number of images to process simultaneously
+    
+    Returns:
+        List of (all_keypoints, all_keypoint_scores) for each image
+    """
+    batch_results = []
+    
+    # Process images in batches
+    for i in range(0, len(images_with_boxes), batch_size):
+        batch_data = images_with_boxes[i:i + batch_size]
+        
+        # Prepare batch inputs
+        batch_images = []
+        batch_boxes_lists = []
+        
+        for image, person_boxes_coco in batch_data:
+            if person_boxes_coco.size == 0:
+                # Handle empty boxes - add dummy entry to maintain batch structure
+                batch_images.append(image)
+                batch_boxes_lists.append([[0, 0, 1, 1]])  # Dummy box
+            else:
+                batch_images.append(image)
+                person_boxes_coco_list = person_boxes_coco.astype(np.float32).tolist()
+                batch_boxes_lists.append(person_boxes_coco_list)
+        
+        # Process batch
+        inputs = pose_image_processor(batch_images, boxes=batch_boxes_lists, return_tensors="pt").to(device)
+        with torch.no_grad():
+            outputs = pose_model(**inputs)
+        
+        # Post-process batch results
+        pose_results = pose_image_processor.post_process_pose_estimation(
+            outputs,
+            boxes=batch_boxes_lists
+        )
+        
+        # Process results for each image in the batch
+        for j, (image, person_boxes_coco) in enumerate(batch_data):
+            if person_boxes_coco.size == 0:
+                batch_results.append(([], []))
+                continue
+                
+            # Access the results for this image
+            if j >= len(pose_results):
+                print(f"Warning: No pose results for image {j}")
+                batch_results.append(([], []))
+                continue
+                
+            image_pose_results = pose_results[j]
+            num_persons = len(batch_boxes_lists[j])
+            
+            # Check if results match input boxes
+            if len(image_pose_results) != num_persons:
+                print(f"Warning estimate_poses_batch: Number of pose results ({len(image_pose_results)}) doesn't match number of input boxes ({num_persons}).")
+            
+            all_keypoints = []
+            all_keypoint_scores = []
+            
+            if not isinstance(image_pose_results, list):
+                print(f"Warning estimate_poses_batch: Unexpected format for image_pose_results: {type(image_pose_results)}")
+                batch_results.append(([], []))
+                continue
+            
+            # Loop through the results for each person
+            for person_idx, person_result in enumerate(image_pose_results):
+                if not isinstance(person_result, dict):
+                    print(f"Warning estimate_poses_batch: Unexpected format for person_result {person_idx}: {type(person_result)}")
+                    all_keypoints.append(np.full((17, 2), np.nan))  # Assuming 17 keypoints
+                    all_keypoint_scores.append(np.zeros(17))
+                    continue
+                
+                keypoints = person_result.get('keypoints', None)
+                scores = person_result.get('scores', None)
+                
+                if keypoints is None or scores is None:
+                    print(f"Warning estimate_poses_batch: Missing 'keypoints' or 'scores' in person_result {person_idx}.")
+                    all_keypoints.append(np.full((17, 2), np.nan))
+                    all_keypoint_scores.append(np.zeros(17))
+                    continue
+                
+                if isinstance(keypoints, torch.Tensor):
+                    keypoints = keypoints.cpu().numpy()
+                if isinstance(scores, torch.Tensor):
+                    scores = scores.cpu().numpy()
+                
+                if not (isinstance(keypoints, np.ndarray) and keypoints.ndim == 2 and keypoints.shape[1] >= 2):
+                    print(f"Warning estimate_poses_batch: Unexpected keypoints format/shape for person {person_idx}: {type(keypoints)}, shape {getattr(keypoints, 'shape', 'N/A')}")
+                    all_keypoints.append(np.full((17, 2), np.nan))
+                    all_keypoint_scores.append(np.zeros(17))
+                    continue
+                
+                all_keypoints.append(keypoints)
+                all_keypoint_scores.append(scores)
+            
+            batch_results.append((all_keypoints, all_keypoint_scores))
+    
+    return batch_results
+
 # Test script to verify the pose detection functionality
 if __name__ == "__main__":
     device = "mps" if torch.backends.mps.is_available() else "cpu"

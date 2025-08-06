@@ -7,6 +7,93 @@ import pandas as pd
 from .pose_detector import SynthPoseMarkers
 from tkinter import Tk, filedialog
 
+def map_synthpose_to_mediapipe(df):
+    """
+    Maps synthpose marker data to Mediapipe format.
+    
+    Args:
+        df: pandas DataFrame with synthpose markers (columns like 'Nose_x', 'Nose_y', 'Nose_z', etc.)
+    
+    Returns:
+        pandas DataFrame with Mediapipe format (columns with nx3 arrays for x,y,z coordinates)
+    """
+    
+    # Mapping from synthpose markers to mediapipe names
+    marker_mapping = {
+        # Face markers
+        'L_Eye': 'left_eye',
+        'R_Eye': 'right_eye', 
+        'L_Ear': 'left_ear',
+        'R_Ear': 'right_ear',
+        'Nose': 'nose',
+        
+        # Body markers
+        'L_Shoulder': 'left_shoulder',
+        'R_Shoulder': 'right_shoulder',
+        'L_Elbow': 'left_elbow',
+        'R_Elbow': 'right_elbow',
+        'L_Wrist': 'left_wrist',
+        'R_Wrist': 'right_wrist',
+        'L_Hip': 'left_hip',
+        'R_Hip': 'right_hip',
+        'L_Knee': 'left_knee',
+        'R_Knee': 'right_knee',
+        'L_Ankle': 'left_ankle',
+        'R_Ankle': 'right_ankle',
+        
+        # Alternative naming patterns in synthpose
+        'lshoulder': 'left_shoulder',
+        'rshoulder': 'right_shoulder',
+        'l_knee': 'left_knee',
+        'r_knee': 'right_knee',
+        'l_ankle': 'left_ankle',
+        'r_ankle': 'right_ankle',
+        
+        # Foot markers - using available toe markers for foot_index
+        'l_big_toe': 'left_foot_index',
+        'r_big_toe': 'right_foot_index',
+        'l_calc': 'left_heel',  # calcaneus = heel
+        'r_calc': 'right_heel',
+        
+        # Fallback foot markers if big toe not available
+        'l_toe': 'left_foot_index',
+        'r_toe': 'right_foot_index',
+        'l_5meta': 'left_foot_index',  # 5th metatarsal as fallback
+        'r_5meta': 'right_foot_index'
+    }
+
+    # Create output dataframe
+    output_df = pd.DataFrame(index=df.index)
+    
+    # Process each mapping
+    for synthpose_marker, mediapipe_name in marker_mapping.items():
+        # Check if this marker exists in the input dataframe
+        x_col = f'{synthpose_marker}_X'
+        y_col = f'{synthpose_marker}_Y'
+        z_col = f'{synthpose_marker}_Z'
+
+        #create the analogous mediapipe columns, ONLY if the mediapipe_x columns do not already exist
+        if f'{mediapipe_name}_x' not in output_df.columns:
+          mediapipe_x_col = f'{mediapipe_name}_x'
+          mediapipe_y_col = f'{mediapipe_name}_y'
+          mediapipe_z_col = f'{mediapipe_name}_z'
+          # # Check if all three columns exist
+          if all(col in df.columns for col in [x_col, y_col, z_col]):            
+            output_df[mediapipe_x_col] = df[x_col]
+            output_df[mediapipe_y_col] = df[y_col]
+            output_df[mediapipe_z_col] = df[z_col]
+
+    
+    output_dict = {}
+    # loop across marker_mapping to create a dictionary of nx3 arrays
+    for mediapipe_name in marker_mapping.values():
+        cols = [col for col in output_df.columns if col.startswith(mediapipe_name)]
+        if len(cols) == 3:
+            output_dict[mediapipe_name] = output_df[cols].to_numpy()
+        else:
+            print(f"Warning: Expected 3 columns for {mediapipe_name}, found {len(cols)}. Skipping this marker.")
+
+    return output_df, output_dict
 
 def quick_rotation_matrix(person_data):
     """
@@ -131,7 +218,6 @@ def get_rotmat_x0(data_nx3,pm = None, xdir=1):
   
   # plot the data, with a title
   f,ax = plt.subplots()
-  plt.ion()
   plt.plot(data_nx3)
   titletxt = f"Click 3 times to back-left, front-left,front-right:"
   plt.title(titletxt)
