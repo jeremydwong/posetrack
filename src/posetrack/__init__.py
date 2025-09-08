@@ -27,7 +27,8 @@ from .processed_visualizations import (
     show_multi_person_results,
     animate_multi_person_results, 
     project_poses_to_video,
-    create_clothing_debug_plot)
+    create_clothing_debug_plot, 
+    batch_project_poses_to_video)
 
 from .libwalk import (
     load_synthpose_csv_as_dict,

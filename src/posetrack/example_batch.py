@@ -1,12 +1,18 @@
-# note: this file is meant to run as a script to test out new features. 
+# note: this file is meant to r un as a script to test out new features. 
 # 2025-07-17: batch-processing a synthpose run. 
 import posetrack as pt 
 import os
-base_dir = '/Users/jeremy/Library/CloudStorage/OneDrive-UniversityofCalgary/Project 2025 Older Adult distributed movement assessments/data/2025-07-25/recordings_carylh'
-pt.batch_process_subfolders(base_dir = base_dir,person_confidence=0.1,
-    keypoint_confidence=0.1, device_name="mps",verbose_debug=False, override_views_used=[(0,2)])
+#%%
+base_dir = '/Users/jeremy/Library/CloudStorage/OneDrive-UniversityofCalgary/Project 2025 Older Adult distributed movement assessments/data/2025-07-25/recordings_garnetm'
+overwrite = False
+#%%
+pt.batch_process_subfolders(base_dir = base_dir, overwrite_tracked_files = overwrite, 
+                            person_confidence=0.1, keypoint_confidence=0.1, device_name="mps",verbose_debug=False, 
+                            override_views_used=[(0,2)])
 
-# base_dir = '/Users/jeremy/Library/CloudStorage/OneDrive-UniversityofCalgary/Project 2025 Older Adult distributed movement assessments/data/2025-07-10/'
+#pt.batch_project_poses_to_video(base_dir)
+
+# base_dir = '/Users/jeremy/Library/]CloudStorage/OneDrive-UniversityofCalgary/Project 2025 Older Adult distributed movement assessments/data/2025-07-10/'
 # which_trial = 'recording_linda_balance4_v3'
 
 # base_dir = '/Users/jeremy/Library/CloudStorage/OneDrive-UniversityofCalgary/Project 2025 Older Adult distributed movement assessments/data/2025-01-07/'

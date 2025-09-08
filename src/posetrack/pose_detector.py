@@ -6,7 +6,9 @@ from PIL import Image
 from transformers import (
     AutoProcessor,
     RTDetrForObjectDetection,
-    VitPoseForPoseEstimation
+    VitPoseForPoseEstimation, 
+    AutoModelForObjectDetection,
+    AutoImageProcessor
 )
 import time
 from tqdm import tqdm
@@ -14,7 +16,7 @@ import supervision as sv # Added for visualization types if needed later
 import pickle # for saving/loading models / results
       
 LOCAL_SP_DIR    = "/Users/jeremy/Git/KeypointInference/models/synthpose/checkpoints"
-LOCAL_DET_DIR   = "/Users/jeremy/Git/KeypointInference/models/rtdetr_r50vd_coco_o365/checkpoints"
+LOCAL_DET_DIR   = "/Users/jeremy/Git/KeypointInference/models/yolov10s/"
 
 # Define the markers directly here. we could rewrite these names, since they become the keys in the dictionary.
 class SynthPoseMarkers:
@@ -40,16 +42,40 @@ def load_models(detect_path=LOCAL_DET_DIR, pose_model_path=LOCAL_SP_DIR, device=
     print(f"Loading models to device: {device}")
 
     # --- Person Detection Model ---
-    print("Loading detection model...")
-    if detect_path and detect_path != "PekingU/rtdetr_r50vd_coco_o365":
-        print(f"Loading local detector from: {detect_path}")
-        person_image_processor = AutoProcessor.from_pretrained(detect_path, local_files_only=True)
-        person_model = RTDetrForObjectDetection.from_pretrained(detect_path, local_files_only=True, device_map=device)
-    else:
-        print("Loading detector from Hugging Face: PekingU/rtdetr_r50vd_coco_o365")
-        # Ensure use_fast=True is compatible or remove if causing issues
-        person_image_processor = AutoProcessor.from_pretrained("PekingU/rtdetr_r50vd_coco_o365")
-        person_model = RTDetrForObjectDetection.from_pretrained("PekingU/rtdetr_r50vd_coco_o365", device_map=device)
+    # print("Loading detection model...")
+    # if detect_path and detect_path != "PekingU/rtdetr_r50vd_coco_o365":
+    #     print(f"Loading local detector from: {detect_path}")
+    #     person_image_processor = AutoProcessor.from_pretrained(detect_path, local_files_only=True)
+    #     person_model = RTDetrForObjectDetection.from_pretrained(detect_path, local_files_only=True, device_map=device)
+    # else:
+    #     print("Loading detector from Hugging Face: PekingU/rtdetr_r50vd_coco_o365")
+    #     # Ensure use_fast=True is compatible or remove if causing issues
+    #     person_image_processor = AutoProcessor.from_pretrained("PekingU/rtdetr_r50vd_coco_o365")
+    #     person_model = RTDetrForObjectDetection.from_pretrained("PekingU/rtdetr_r50vd_coco_o365", device_map=device)
+
+    from ultralytics import YOLO
+    from huggingface_hub import hf_hub_download
+
+    # Define where you want to store the model
+    
+    os.makedirs(detect_path,exist_ok=True)
+    model_id = "jameslahm/yolov10s.pt"
+    filename = model_id.split('/')[-1]
+    model_path = os.path.join(detect_path,filename)
+
+    # Check if model already exists locally.
+    # note: ultralytics packages processor and model together. 
+    if not os.path.exists(model_path):
+        # Download only if it doesn't exist
+        print("Downloading model...")
+        model_path = hf_hub_download(
+        repo_id=model_id,
+        filename=filename,
+        cache_dir=detect_path,
+        local_dir_use_symlinks=False)
+        
+    person_model = YOLO(model_path)    
+    person_model.to(device)
 
     # --- Pose Estimation Model ---
     print(f"Loading pose estimation model from: {pose_model_path}")
@@ -58,9 +84,39 @@ def load_models(detect_path=LOCAL_DET_DIR, pose_model_path=LOCAL_SP_DIR, device=
     pose_model = VitPoseForPoseEstimation.from_pretrained(pose_model_path, local_files_only=True, device_map=device)
 
     print("Models loaded successfully.")
-    return person_image_processor, person_model, pose_image_processor, pose_model
+    return None, person_model, pose_image_processor, pose_model
 
 def detect_persons(image, person_image_processor, person_model, device, confidence_threshold=0.3):
+    """Drop-in replacement for RT-DETR using YOLO - same function signature"""
+    
+    results = person_model(image, conf=confidence_threshold, half=True, classes=[0])  # class 0 = person
+        # imgsz=640,        # Input size (preprocessing)
+    # conf=0.25,        # Confidence threshold (postprocessing)
+    # iou=0.45,         # NMS IoU threshold (postprocessing)
+    # max_det=300,      # Maximum detections (postprocessing)
+    # augment=False,    # Test-time augmentation
+    # half=False,       # FP16 inference
+    # device='cpu'      # Device selection
+    
+    if len(results[0].boxes) == 0:
+        # Return empty arrays - same as your original
+        return np.empty((0, 4), dtype=np.float32), \
+               np.empty((0, 4), dtype=np.float32), \
+               np.empty((0,), dtype=np.float32)
+    
+    boxes = results[0].boxes
+    
+    person_boxes_voc = boxes.xyxy.cpu().numpy()      # (x1, y1, x2, y2) - VOC format
+    person_scores = boxes.conf.cpu().numpy()
+    
+    # Convert boxes from VOC (x1, y1, x2, y2) to COCO (x1, y1, w, h) - same as your original
+    person_boxes_coco = person_boxes_voc.copy()
+    person_boxes_coco[:, 2] = person_boxes_coco[:, 2] - person_boxes_coco[:, 0] # w = x2 - x1
+    person_boxes_coco[:, 3] = person_boxes_coco[:, 3] - person_boxes_coco[:, 1] # h = y2 - y1
+    
+    return person_boxes_voc, person_boxes_coco, person_scores
+
+def detect_persons_rtdetr(image, person_image_processor, person_model, device, confidence_threshold=0.3):
     """Detects persons in a PIL Image."""
     inputs = person_image_processor(images=image, return_tensors="pt").to(device)
     with torch.no_grad():
@@ -187,7 +243,7 @@ def estimate_poses(
 
     # --- Debugging Visualization ---
     # (Keep the plotting code as is)
-    if debug_plot or debug_save_prefix and len(all_keypoints) > 0:
+    if debug_plot and len(all_keypoints) > 0:
         print("Debugging visualization enabled. Plotting keypoints and boxes...")
         try:
             frame_bgr = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
@@ -224,20 +280,21 @@ def estimate_poses(
             cv2.imshow("Pose Estimation Debug", frame_bgr)
             cv2.waitKey(0)  # Wait for a key press to close the window
 
-            if debug_save_prefix is not None:
-                output_filename = os.path.join(debug_save_prefix,"pose.png")
-                os.makedirs(os.path.dirname(debug_save_prefix), exist_ok=True)
-                cv2.imwrite(output_filename, frame_bgr)
-            
-            cv2.destroyAllWindows()
-
         except Exception as e:
             print(f"Error during debug plotting in estimate_poses: {e}")
-    # --- End Debugging Visualization ---
+
+    if debug_plot and debug_save_prefix is not None:
+            output_filename = os.path.join(debug_save_prefix,"pose.png")
+            os.makedirs(os.path.dirname(debug_save_prefix), exist_ok=True)
+            cv2.imwrite(output_filename, frame_bgr)
+            cv2.destroyAllWindows()
+
+
     return all_keypoints, all_keypoint_scores
 
-def detect_persons_batch(images, person_image_processor, person_model, device, confidence_threshold=0.3, batch_size=8):
+def detect_persons_rdetr(images, person_image_processor, person_model, device, confidence_threshold=0.3, batch_size=8):
     """Batch detects persons in multiple PIL Images with debugging."""
+
     import time
     
     batch_results = []
@@ -307,7 +364,51 @@ def detect_persons_batch(images, person_image_processor, person_model, device, c
             batch_results.append((person_boxes_voc, person_boxes_coco, person_scores))
     
     return batch_results
-
+def detect_persons_batch(images, person_image_processor, person_model, device, confidence_threshold=0.3, batch_size=8):
+    """Batch detects persons in multiple PIL Images with debugging."""
+    
+    import time
+    
+    batch_results = []
+    
+    # DEBUG: Time single image processing
+    if len(images) > 0:
+        start_time = time.perf_counter()
+        single_inputs = person_model(images[0],conf=confidence_threshold, half=True, classes=[0])
+        single_time = time.time() - start_time
+        print(f"DEBUG: Single image processing time: {single_time:.4f}s")
+    
+    # Process images in batches
+    for i in range(0, len(images), batch_size):
+        batch_images = images[i:i + batch_size]
+        actual_batch_size = len(batch_images)
+        
+        # DEBUG: Time batch processing
+        start_time = time.time()
+        
+        # do the batch processing.
+        results = person_model(batch_images, conf=confidence_threshold, half=True,classes=[0],batch=len(batch_images))
+        
+        batch_time = time.time() - start_time
+        print(f"DEBUG: Batch of {actual_batch_size} images time: {batch_time:.4f}s")
+        print(f"DEBUG: Time per image in batch: {batch_time/actual_batch_size:.4f}s")
+        
+        # Process each image result in the batch
+        for result in results:
+            if result.boxes is not None and len(result.boxes) > 0:
+            # All boxes are persons since we filtered with classes=[0]
+                person_boxes_voc = result.boxes.xyxy.cpu().numpy()  # VOC format
+                person_boxes_coco = result.boxes.xywh.cpu().numpy() # COCO format
+                person_scores = result.boxes.conf.cpu().numpy()
+            else:
+                # Empty arrays matching your format
+                person_boxes_voc = np.empty((0, 4), dtype=np.float32)
+                person_boxes_coco = np.empty((0, 4), dtype=np.float32)
+                person_scores = np.empty((0,), dtype=np.float32)
+            
+            batch_results.append((person_boxes_voc, person_boxes_coco, person_scores))
+    
+    return batch_results
 
 def estimate_poses_batch(images_with_boxes, pose_image_processor, pose_model, device, batch_size=8):
     """

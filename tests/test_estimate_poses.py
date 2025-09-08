@@ -6,6 +6,7 @@ import cv2 # Needed for visualization if using cv2 directly, or by supervision
 from PIL import Image
 import os
 import argparse
+import time
 import supervision as sv # For visualization consistency with original test/pose_detector
 
 # Ensure the src directory is in the Python path for imports
@@ -92,9 +93,12 @@ def run_verification(image_path, output_dir=os.path.join(path_to_project_root,"o
     print("Detecting persons using pose_detector.detect_persons...")
     try:
         # Use the detect_persons function
+        start_time = time.perf_counter()
         person_boxes_voc, person_boxes_coco, person_scores = detect_persons(
             image_pil, person_processor, person_model, device, confidence_threshold=person_conf
         )
+        end_time = time.perf_counter()
+        print(f"Human Detection took {end_time-start_time:.2f} s.")
         print(f"Detected {len(person_boxes_voc)} persons.")
         if len(person_boxes_voc) > 0:
             print(f"  Example VOC box (xyxy): {person_boxes_voc[0]}")
@@ -121,10 +125,13 @@ def run_verification(image_path, output_dir=os.path.join(path_to_project_root,"o
         print("Estimating poses using pose_detector.estimate_poses...")
         try:
             # Make sure to pass the COCO boxes
+            start_time = time.perf_counter()
             all_keypoints, all_keypoint_scores = estimate_poses(
                 image_pil, person_boxes_coco, pose_processor, pose_model, device,
-                debug_plot=True, 
+                debug_plot=show_result, 
                 debug_save_prefix = output_dir)
+            end_time = time.perf_counter()
+            print(f"Keypoint pose inference took {end_time-start_time:.2f} seconds.")
             print(f"Estimated poses for {len(all_keypoints)} persons.") 
             #save all_keypoints using pickle, to be compared with during testing with assertions
             import pickle
@@ -167,12 +174,15 @@ if __name__ == "__main__":
     parser.add_argument("--pose_model", default=LOCAL_SP_DIR, help="Path to the local SynthPose model directory.")
     parser.add_argument("--detector_model", default=LOCAL_DET_DIR, help="Path to the local RT-DETR model directory (optional, uses HF if None).")
     parser.add_argument("--device", default="mps", choices=['auto', 'cpu', 'mps', 'cuda'], help="Computation device.")
-    parser.add_argument("--person_conf", type=float, default=0.3, help="Confidence threshold for person detection.")
+    parser.add_argument("--person_conf", type=float, default=0.05, help="Confidence threshold for person detection.")
     parser.add_argument("--hide", action="store_true", help="Do not display the annotated image.")
     parser.add_argument("--no_save", action="store_true", help="Do not save the annotated image.")
+    parser.add_argument("--show_result", type=bool, default=False, help="show the resulting figures (which will affect performance estimates).")
 
     args = parser.parse_args()
 
+    print("Starting first run_verification...")
+    start_time = time.perf_counter()
     run_verification(
         image_path=args.image,
         output_dir=args.output_dir,
@@ -180,10 +190,14 @@ if __name__ == "__main__":
         detector_dir=args.detector_model,
         pose_model_dir=args.pose_model,
         person_conf=args.person_conf,
-        show_result=True,
+        show_result=False,
         save_result=not args.no_save
     )
+    end_time = time.perf_counter()
+    print(f"First run_verification completed in {end_time - start_time:.2f} seconds")
     
+    print("Starting second run_verification...")
+    start_time = time.perf_counter()
     run_verification(
         image_path="tests/image/many.png",
         output_dir=args.output_dir,
@@ -194,3 +208,5 @@ if __name__ == "__main__":
         show_result=True,
         save_result=not args.no_save
     )
+    end_time = time.perf_counter()
+    print(f"Second run_verification completed in {end_time - start_time:.2f} seconds")

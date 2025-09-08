@@ -14,6 +14,21 @@ from .cs_parse import parse_calibration_mwc, calculate_projection_matrices
 from .pose_detector import SynthPoseMarkers
 from .libwalk import quick_rotation_matrix
 
+def batch_project_poses_to_video(base_dir):
+    subfolders = [f.path for f in os.scandir(base_dir) if f.is_dir()]
+    print(subfolders)
+
+
+    for subfolder in subfolders:
+        print(f"Processing subfolder: {subfolder}")
+        results_directory = os.path.join(subfolder, 'synthpose')
+        if not os.path.exists(results_directory):
+            print(f"Skipping {results_directory} as it does not exist.")
+            continue
+
+        # project the poses to video
+        project_poses_to_video(results_directory, verbose = False, port_number=0, output_video_name="detected_people.mp4")
+
 def project_3d_to_2d(point_3d, P):
     """Projects a 3D point to 2D using a projection matrix."""
     if point_3d is None or np.isnan(point_3d).any(): 
@@ -243,7 +258,7 @@ def read_posetrack_csv(csv_path):
         print(f"Error reading CSV file {csv_path}: {e}")
         return None
 
-def show_multi_person_results(results_directory, output_plot_path=None):
+def show_multi_person_results(results_directory, output_plot_path=None, verbose = True):
     """
     Read all person CSV files from a directory and create a timeline plot 
     showing when each detected person was active.
@@ -288,6 +303,9 @@ def show_multi_person_results(results_directory, output_plot_path=None):
         print("No valid person data found")
         return
     
+    if verbose==False:
+        return person_data, person_files_data
+
     # Create the timeline plot
     plt.figure(figsize=(12, 8))
     
@@ -339,8 +357,11 @@ def show_multi_person_results(results_directory, output_plot_path=None):
     if output_plot_path:
         plt.savefig(output_plot_path, dpi=300, bbox_inches='tight')
         print(f"Plot saved to: {output_plot_path}")
-    else:
+        
+    if verbose:
         plt.show()
+    else:
+        plt.close()
     
     return person_data, person_files_data
 
@@ -620,14 +641,15 @@ def project_poses_to_video(synthpose_directory_path, port_number, output_video_n
     import os
     
     # Load person data
-    if verbose:
-        print(f"Loading person data from: {synthpose_directory_path}")
-        person_data, person_files_data = show_multi_person_results(synthpose_directory_path, output_plot_path=None)
-    
-        if not person_data or not person_files_data:
-            print("No person data available for video projection")
-            return
-    
+    print(f"Loading person data from: {synthpose_directory_path}")
+    bothret = show_multi_person_results(synthpose_directory_path, verbose=verbose, output_plot_path=None)
+
+    if bothret is None:
+        print("No person data available for video projection")
+        return
+    else: 
+        (person_data, person_files_data) = bothret
+
     # Load calibration. typically the config.toml is uh 3 levels up from the specific synthpose_directory_path
     # so use os.path.basename to get the parent directory
     calibration_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(synthpose_directory_path))), "config.toml")

@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from matplotlib.widgets import Slider, Button
 import glob
+from re import match 
 
 from .cs_parse import parse_calibration_mwc, parse_calibration_fmc, calculate_projection_matrices, triangulate_keypoints
 from .pose_detector import load_models, detect_persons, detect_persons_batch, estimate_poses, estimate_poses_batch, SynthPoseMarkers, LOCAL_DET_DIR, LOCAL_SP_DIR
@@ -28,6 +29,47 @@ def project_3d_to_2d(point_3d, P):
     if abs(point_2d_hom[2]) < 1e-6 : return None # Check for near-zero depth
     point_2d = point_2d_hom[:2] / point_2d_hom[2]
     return point_2d.flatten()
+
+def project_keypoints_to_all_cameras_ultrafast(keypoints_3d, projection_matrices, common_ports, port_to_cam_index):
+    """Process all cameras simultaneously for maximum speed."""
+    
+    n_keypoints = len(keypoints_3d)
+    n_cameras = len(common_ports)
+    
+    # Create mask and indices once
+    valid_mask = np.array([kp is not None for kp in keypoints_3d], dtype=bool)
+    valid_idx = np.where(valid_mask)[0]
+    
+    # Build homogeneous coordinates
+    kp_homo = np.zeros((n_keypoints, 4))
+    kp_homo[:, 3] = 1
+    if len(valid_idx) > 0:
+        kp_homo[valid_idx, :3] = np.array([keypoints_3d[i] for i in valid_idx])
+    
+    # Stack all projection matrices
+    P_all = np.array([projection_matrices[port_to_cam_index[port]] for port in common_ports])
+    
+    # Project to all cameras at once: (n_cameras, 3, 4) @ (4, n_keypoints)
+    all_projected = np.einsum('cij,jk->cik', P_all, kp_homo.T)  # (n_cameras, 3, n_keypoints)
+    
+    # Pre-allocate all results
+    all_pixels = np.full((n_cameras, n_keypoints, 2), np.nan)
+    
+    # Process all cameras
+    if len(valid_idx) > 0:
+        z_vals = all_projected[:, 2, valid_idx]  # (n_cameras, n_valid)
+        
+        for c in range(n_cameras):
+            z_valid = z_vals[c] > 1e-6
+            final_idx = valid_idx[z_valid]
+            if len(final_idx) > 0:
+                all_pixels[c, final_idx, 0] = all_projected[c, 0, final_idx] / all_projected[c, 2, final_idx]
+                all_pixels[c, final_idx, 1] = all_projected[c, 1, final_idx] / all_projected[c, 2, final_idx]
+    
+    # Convert to dictionary
+    pixel_coords = {port: all_pixels[i].tolist() for i, port in enumerate(common_ports)}
+    
+    return pixel_coords
 
 def project_keypoints_to_all_cameras(keypoints_3d, projection_matrices, common_ports, port_to_cam_index):
     """Project 3D keypoints to 2D pixel coordinates for all cameras."""
@@ -419,16 +461,22 @@ def process_synced_mwc_frames_multi_person(
             # Continue to next frame without updating any results
             continue
 
-        # Update existing tracks
+        # Update existing tracks.
+        # since nothing in the above prevents us from tracking more than the number of desired active tracks, 
+        # we need to do so here. 
+        # here track_id is an actual id. 
         for track_id,curtuple in track_assignments.items():
             if curtuple is not None:
                 (grp_idx, candidate_idx) = curtuple
-            
+    
+
             if candidate_idx is not None:
                 candidate = candidate_3d_groups[grp_idx][candidate_idx]
                 if len(active_tracks) < max_persons:
                     new_track = PersonTrack(track_id, candidate_3d_groups[grp_idx][candidate_idx]['keypoints_3d'], sync_index, candidate['views'])
                     active_tracks.append(new_track)
+                    print("added new track")
+                    #track_idx = len(active_tracks)
                 else:
                     # find which track to update
                     track_idx = None
@@ -439,9 +487,10 @@ def process_synced_mwc_frames_multi_person(
                     if track_idx is not None:
                         active_tracks[track_idx].update(candidate['keypoints_3d'], sync_index, candidate['views'])
                     else:
-                        print(f"Warn: Track ID {track_id} not found in active tracks.")
+                        print(f"Warn: Track ID {track_id} not found in active tracks, and we're full! Continue-ing.")
+                        continue
 
-                # Store result
+                #
                 person_id = active_tracks[track_id].id
                 if person_id not in all_results_by_person:
                     all_results_by_person[person_id] = []
@@ -1285,7 +1334,8 @@ def assign_3d_candidates_to_tracks(active_tracks, candidate_groups, max_distance
         max_distance: Maximum distance for any match
     
     Returns:
-        assignments: List where assignments[track_idx] = (group_idx, selected_candidate_idx) or None
+        assignments: List, indexed by TRACK ID. Maybe this is stupid. the idea is that we can use this track ID
+        in the next loop. 
         unassigned_groups: List of group indices not assigned to any track
     """
     import numpy as np
@@ -1300,7 +1350,7 @@ def assign_3d_candidates_to_tracks(active_tracks, candidate_groups, max_distance
 
     def set_default_views(ingroups):
         default_views = []
-        default_views.append(ingroups[0]['views'])
+        default_views.append(ingroups[0][0]['views'])
         return default_views
 
     if n_tracks == 0:
@@ -2263,7 +2313,7 @@ def read_posetrack_csv(csv_path):
         print(f"Error reading CSV file {csv_path}: {e}")
         return None
 
-def batch_process_subfolders(base_dir, **kwargs):
+def batch_process_subfolders(base_dir, overwrite_tracked_files = False, **kwargs):
     """
     Batch process all subfolders within a directory.
     Each subfolder should contain the necessary files for multi-person pose processing.
@@ -2302,9 +2352,22 @@ def batch_process_subfolders(base_dir, **kwargs):
         output_dir = os.path.join(subfolder_path, "synthpose")
         os.makedirs(output_dir, exist_ok=True)
         output_path = os.path.join(output_dir, "output_3d_poses_tracked.csv")
-        
-        print(f"looking for {output_path}")
 
+        matching_files = []        
+        if not overwrite_tracked_files:
+            # check for existing files 
+            print(f"looking for existing files of type {output_path}")
+            pattern = r"output_3d_poses_tracked\.csv_person[0-9]\.csv"
+
+            for filename in os.listdir(output_dir):
+                if match(pattern, filename):
+                    matching_files.append(filename)
+            if not matching_files: 
+                print("no matching files. No risk of overwrite, Proceeding.")
+            else:
+                print("Overwrite set to false and there are tracked.csv files. skipping.")
+                continue
+            
         # Check if required files exist
         if not os.path.exists(frame_time_history_csv):
             print(f"Warning: frame_time_history.csv not found in {subfolder_path}, skipping...")
@@ -2313,19 +2376,19 @@ def batch_process_subfolders(base_dir, **kwargs):
             print(f"Warning: config.toml not found in {subfolder_path}, skipping...")
             continue
         
-        try:
-            # Process this subfolder
-            process_synced_mwc_frames_multi_person(
-                frame_history_csv_path=frame_time_history_csv,
-                calibration_path=calibration_path,
-                video_dir=subfolder_path,
-                output_path=output_path,
-                **kwargs
-            )
-            print(f"Successfully processed {subfolder}")
-        except Exception as e:
-            print(f"Error processing {subfolder}: {e}")
-            continue
+        # try:
+        # Process this subfolder
+        process_synced_mwc_frames_multi_person(
+            frame_history_csv_path=frame_time_history_csv,
+            calibration_path=calibration_path,
+            video_dir=subfolder_path,
+            output_path=output_path,
+            **kwargs
+        )
+        print(f"Successfully processed {subfolder}")
+        # except Exception as e:
+        #     print(f"Error processing {subfolder}: {e}")
+        #     continue
     
     print(f"\nBatch processing completed.")
 
