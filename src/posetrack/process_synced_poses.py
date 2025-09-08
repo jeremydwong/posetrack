@@ -20,6 +20,60 @@ from .cs_parse import parse_calibration_mwc, parse_calibration_fmc, calculate_pr
 from .pose_detector import load_models, detect_persons, detect_persons_batch, estimate_poses, estimate_poses_batch, SynthPoseMarkers, LOCAL_DET_DIR, LOCAL_SP_DIR
 from .libwalk import quick_rotation_matrix
 
+
+    # --- Multi-Person Tracking State ---
+class PersonTrack:
+    def __init__(self, track_id, keypoints_3d, sync_index, hip_indices, views_used=None, track_frames_til_lost_patience = 10, min_keypoints_for_com=2):
+        self.id = track_id
+        self.keypoints_3d_history = [keypoints_3d]  # List of 3D keypoints over time
+        self.views_used_history = [views_used] if views_used is not None else []  # List of views_used over time
+        self.last_seen_sync = sync_index
+        self.frames_since_seen = 0
+        self.is_active = True
+        self.hip_indices = hip_indices
+        self.track_frames_til_lost_patience = track_frames_til_lost_patience
+        self.min_keypoints_for_com = min_keypoints_for_com
+        
+    def update(self, keypoints_3d, sync_index, views_used=None):
+        self.keypoints_3d_history.append(keypoints_3d)
+        if views_used is not None:
+            self.views_used_history.append(views_used)
+        self.last_seen_sync = sync_index
+        self.frames_since_seen = 0
+        
+    def get_last_views_used(self):
+        """Get the views_used from the most recent frame."""
+        if not self.views_used_history:
+            return None
+        return self.views_used_history[-1]
+        
+    def increment_lost_counter(self):
+        self.frames_since_seen += 1
+        if self.frames_since_seen > self.track_frames_til_lost_patience:
+            self.is_active = False
+            
+    def get_com_3d(self):
+        """Get 3D center of mass from last known keypoints."""
+        if not self.keypoints_3d_history:
+            return None
+        last_kps = self.keypoints_3d_history[-1]
+        if last_kps is None:
+            return None
+        
+        # Get hip keypoints
+        left_hip = last_kps[self.hip_indices[0]] if self.hip_indices[0] < len(last_kps) else None
+        right_hip = last_kps[self.hip_indices[1]] if self.hip_indices[1] < len(last_kps) else None
+        
+        valid_hips = []
+        if left_hip is not None and not np.isnan(left_hip).any():
+            valid_hips.append(left_hip)
+        if right_hip is not None and not np.isnan(right_hip).any():
+            valid_hips.append(right_hip)
+            
+        if len(valid_hips) >= self.min_keypoints_for_com:
+            return np.mean(valid_hips, axis=0)
+        return None
+
 # --- Add the project_3d_to_2d helper function here or import it ---
 def project_3d_to_2d(point_3d, P):
     """Projects a 3D point to 2D using a projection matrix."""
@@ -153,7 +207,7 @@ def process_synced_mwc_frames_multi_person(
     # --- Tracking parameters ---
     max_persons=2,  # Maximum number of persons to track
     com_distance_threshold=0.3,  # meters - minimum distance between COMs to be different people
-    track_lost_patience=10,  # frames to wait before considering a track lost
+    track_frames_til_lost_patience=10,  # frames to wait before considering a track lost
     min_keypoints_for_com=2,  # minimum valid hip keypoints needed to compute COM
     hip_indices=(11, 12),  # COCO format: left hip, right hip
     epipolar_threshold=10,  # pixels - max distance from epipolar line
@@ -276,57 +330,6 @@ def process_synced_mwc_frames_multi_person(
         print("⚠ Frame alignment validation FAILED - cannot assume sync_index corresponds to video frame positions!")
         print("  This may indicate missing frames at start/end or sync timing issues.")
 
-
-    # --- Multi-Person Tracking State ---
-    class PersonTrack:
-        def __init__(self, track_id, keypoints_3d, sync_index, views_used=None):
-            self.id = track_id
-            self.keypoints_3d_history = [keypoints_3d]  # List of 3D keypoints over time
-            self.views_used_history = [views_used] if views_used is not None else []  # List of views_used over time
-            self.last_seen_sync = sync_index
-            self.frames_since_seen = 0
-            self.is_active = True
-            
-        def update(self, keypoints_3d, sync_index, views_used=None):
-            self.keypoints_3d_history.append(keypoints_3d)
-            if views_used is not None:
-                self.views_used_history.append(views_used)
-            self.last_seen_sync = sync_index
-            self.frames_since_seen = 0
-            
-        def get_last_views_used(self):
-            """Get the views_used from the most recent frame."""
-            if not self.views_used_history:
-                return None
-            return self.views_used_history[-1]
-            
-        def increment_lost_counter(self):
-            self.frames_since_seen += 1
-            if self.frames_since_seen > track_lost_patience:
-                self.is_active = False
-                
-        def get_com_3d(self):
-            """Get 3D center of mass from last known keypoints."""
-            if not self.keypoints_3d_history:
-                return None
-            last_kps = self.keypoints_3d_history[-1]
-            if last_kps is None:
-                return None
-            
-            # Get hip keypoints
-            left_hip = last_kps[hip_indices[0]] if hip_indices[0] < len(last_kps) else None
-            right_hip = last_kps[hip_indices[1]] if hip_indices[1] < len(last_kps) else None
-            
-            valid_hips = []
-            if left_hip is not None and not np.isnan(left_hip).any():
-                valid_hips.append(left_hip)
-            if right_hip is not None and not np.isnan(right_hip).any():
-                valid_hips.append(right_hip)
-                
-            if len(valid_hips) >= min_keypoints_for_com:
-                return np.mean(valid_hips, axis=0)
-            return None
-
     active_tracks = []  # List of PersonTrack objects
     next_track_id = 0
     all_results_by_person = {}  # {person_id: [results]}
@@ -429,7 +432,7 @@ def process_synced_mwc_frames_multi_person(
         groups = group_detections_across_views_bipartite_full(view_detections, None, 
                                            projection_matrices, port_to_cam_index,
                                            camera_params, epipolar_threshold=epipolar_threshold)
-        # we still use epipolar grouping here. 
+        # or epipolar:
         # group_detections_epipolar(view_detections, None,
         #                          projection_matrices, port_to_cam_index,
         #                          camera_params, epipolar_threshold=30)
@@ -462,19 +465,20 @@ def process_synced_mwc_frames_multi_person(
             continue
 
         # Update existing tracks.
-        # since nothing in the above prevents us from tracking more than the number of desired active tracks, 
-        # we need to do so here. 
-        # here track_id is an actual id. 
+        # super confusing because of the sheer number of lists we are keeping track of. 
+        # track list: a list of the currently-tracked PersonTrack. this has a track_id.  
+        # grp list: a list of lists! each list has a list of clumped together people.
+        # within-grp- candidate list-> these are the list-inside-the-grp list. 
+        
         for track_id,curtuple in track_assignments.items():
             if curtuple is not None:
                 (grp_idx, candidate_idx) = curtuple
     
-
             if candidate_idx is not None:
                 candidate = candidate_3d_groups[grp_idx][candidate_idx]
                 if len(active_tracks) < max_persons:
-                    new_track = PersonTrack(track_id, candidate_3d_groups[grp_idx][candidate_idx]['keypoints_3d'], sync_index, candidate['views'])
-                    active_tracks.append(new_track)
+                    new_track = PersonTrack(track_id, candidate_3d_groups[grp_idx][candidate_idx]['keypoints_3d'], sync_index,hip_indices,candidate['views'])
+                    active_tracks.append(new_track) 
                     print("added new track")
                     #track_idx = len(active_tracks)
                 else:
@@ -618,7 +622,7 @@ def process_synced_mwc_frames_multi_person_perf(
     # --- Tracking parameters ---
     max_persons=2,  # Maximum number of persons to track
     com_distance_threshold=0.3,  # meters - minimum distance between COMs to be different people
-    track_lost_patience=10,  # frames to wait before considering a track lost
+    track_frames_til_lost_patience=10,  # frames to wait before considering a track lost
     min_keypoints_for_com=2,  # minimum valid hip keypoints needed to compute COM
     hip_indices=(11, 12),  # COCO format: left hip, right hip
     epipolar_threshold=30,  # pixels - max distance from epipolar line
@@ -764,57 +768,6 @@ def process_synced_mwc_frames_multi_person_perf(
     else:
         print("⚠ Frame alignment validation FAILED - cannot assume sync_index corresponds to video frame positions!")
         print("  This may indicate missing frames at start/end or sync timing issues.")
-
-
-    # --- Multi-Person Tracking State ---
-    class PersonTrack:
-        def __init__(self, track_id, keypoints_3d, sync_index, views_used=None):
-            self.id = track_id
-            self.keypoints_3d_history = [keypoints_3d]  # List of 3D keypoints over time
-            self.views_used_history = [views_used] if views_used is not None else []  # List of views_used over time
-            self.last_seen_sync = sync_index
-            self.frames_since_seen = 0
-            self.is_active = True
-            
-        def update(self, keypoints_3d, sync_index, views_used=None):
-            self.keypoints_3d_history.append(keypoints_3d)
-            if views_used is not None:
-                self.views_used_history.append(views_used)
-            self.last_seen_sync = sync_index
-            self.frames_since_seen = 0
-            
-        def get_last_views_used(self):
-            """Get the views_used from the most recent frame."""
-            if not self.views_used_history:
-                return None
-            return self.views_used_history[-1]
-            
-        def increment_lost_counter(self):
-            self.frames_since_seen += 1
-            if self.frames_since_seen > track_lost_patience:
-                self.is_active = False
-                
-        def get_com_3d(self):
-            """Get 3D center of mass from last known keypoints."""
-            if not self.keypoints_3d_history:
-                return None
-            last_kps = self.keypoints_3d_history[-1]
-            if last_kps is None:
-                return None
-            
-            # Get hip keypoints
-            left_hip = last_kps[hip_indices[0]] if hip_indices[0] < len(last_kps) else None
-            right_hip = last_kps[hip_indices[1]] if hip_indices[1] < len(last_kps) else None
-            
-            valid_hips = []
-            if left_hip is not None and not np.isnan(left_hip).any():
-                valid_hips.append(left_hip)
-            if right_hip is not None and not np.isnan(right_hip).any():
-                valid_hips.append(right_hip)
-                
-            if len(valid_hips) >= min_keypoints_for_com:
-                return np.mean(valid_hips, axis=0)
-            return None
 
     active_tracks = []  # List of PersonTrack objects
     next_track_id = 0
@@ -991,7 +944,7 @@ def process_synced_mwc_frames_multi_person_perf(
             
             # --- Associate 3D candidates with existing tracks ---
             track_assignments, unused_3d_groups = assign_3d_candidates_to_tracks(
-                active_tracks, candidate_3d_groups, 0.5
+                active_tracks, candidate_3d_groups, 0.15,default_views=override_views_used
             )
             
             # Check if this is a bad frame (no successful assignments)
@@ -1018,7 +971,7 @@ def process_synced_mwc_frames_multi_person_perf(
                 if candidate_idx is not None:
                     candidate = candidate_3d_groups[grp_idx][candidate_idx]
                     if len(active_tracks) < max_persons:
-                        new_track = PersonTrack(track_id, candidate_3d_groups[grp_idx][candidate_idx]['keypoints_3d'], sync_index, candidate['views'])
+                        new_track = new_track = PersonTrack(track_id, candidate_3d_groups[grp_idx][candidate_idx]['keypoints_3d'], sync_index,hip_indices,views_used=candidate['views'])
                         active_tracks.append(new_track)
                     else:
                         # find which track to update
@@ -1031,6 +984,7 @@ def process_synced_mwc_frames_multi_person_perf(
                             active_tracks[track_idx].update(candidate['keypoints_3d'], sync_index, candidate['views'])
                         else:
                             print(f"Warn: Track ID {track_id} not found in active tracks.")
+                            continue
 
                     # Store result
                     person_id = active_tracks[track_id].id
@@ -1334,8 +1288,7 @@ def assign_3d_candidates_to_tracks(active_tracks, candidate_groups, max_distance
         max_distance: Maximum distance for any match
     
     Returns:
-        assignments: List, indexed by TRACK ID. Maybe this is stupid. the idea is that we can use this track ID
-        in the next loop. 
+        assignments: List of tuples, indexed by TRACK_ID. 
         unassigned_groups: List of group indices not assigned to any track
     """
     import numpy as np
@@ -1442,7 +1395,7 @@ def assign_tracks_to_detections(active_tracks, new_persons_3d, distance_threshol
     
     # Assign tracks to detections
     for track_idx, track in enumerate(active_tracks):
-        track_com = track.get_com_3d()
+        track_com = track.get_com_3d(hip_indices)
         if track_com is None:
             assignments[track_idx] = None
             continue
@@ -1856,7 +1809,7 @@ def wrap_process_synced_mwc_frames_multi_person(directory_name,model_dir=LOCAL_S
     keypoint_confidence=0.1, device_name="auto",
     max_persons=2,  # Maximum number of persons to track
     com_distance_threshold=0.5,  # meters - minimum distance between COMs to be different people
-    track_lost_patience=10,  # frames to wait before considering a track lost
+    track_frames_til_lost_patience=10,  # frames to wait before considering a track lost
     min_keypoints_for_com=2,  # minimum valid hip keypoints needed to compute COM
     hip_indices=(11, 12),  # COCO format: left hip, right hip
     ):

@@ -364,7 +364,7 @@ def detect_persons_rdetr(images, person_image_processor, person_model, device, c
             batch_results.append((person_boxes_voc, person_boxes_coco, person_scores))
     
     return batch_results
-def detect_persons_batch(images, person_image_processor, person_model, device, confidence_threshold=0.3, batch_size=8):
+def detect_persons_batch_rtdetr(images, person_image_processor, person_model, device, confidence_threshold=0.3, batch_size=8):
     """Batch detects persons in multiple PIL Images with debugging."""
     
     import time
@@ -399,6 +399,52 @@ def detect_persons_batch(images, person_image_processor, person_model, device, c
             # All boxes are persons since we filtered with classes=[0]
                 person_boxes_voc = result.boxes.xyxy.cpu().numpy()  # VOC format
                 person_boxes_coco = result.boxes.xywh.cpu().numpy() # COCO format
+                person_scores = result.boxes.conf.cpu().numpy()
+            else:
+                # Empty arrays matching your format
+                person_boxes_voc = np.empty((0, 4), dtype=np.float32)
+                person_boxes_coco = np.empty((0, 4), dtype=np.float32)
+                person_scores = np.empty((0,), dtype=np.float32)
+            
+            batch_results.append((person_boxes_voc, person_boxes_coco, person_scores))
+    
+    return batch_results
+
+def detect_persons_batch(images, person_image_processor, person_model, device, confidence_threshold=0.3, batch_size=8):
+    """Batch detects persons in multiple PIL Images with debugging."""
+    import time
+    
+    batch_results = []
+    
+    # DEBUG: Time single image processing
+    if len(images) > 0:
+        start_time = time.perf_counter()
+        single_results = person_model(images[0], conf=confidence_threshold, half=True, classes=[0])
+        single_time = time.perf_counter() - start_time
+        print(f"DEBUG: Single image processing time: {single_time:.4f}s")
+    
+    # Process images in batches
+    for i in range(0, len(images), batch_size):
+        batch_images = images[i:i + batch_size]
+        actual_batch_size = len(batch_images)
+        
+        # DEBUG: Time batch processing
+        start_time = time.perf_counter()
+        results = person_model(batch_images, conf=confidence_threshold, half=True, classes=[0], batch=len(batch_images))
+        batch_time = time.perf_counter() - start_time
+        print(f"DEBUG: Batch of {actual_batch_size} images time: {batch_time:.4f}s")
+        print(f"DEBUG: Time per image in batch: {batch_time/actual_batch_size:.4f}s")
+        
+        # Process each image result in the batch
+        for result in results:
+            if result.boxes is not None and len(result.boxes) > 0:
+                person_boxes_voc = result.boxes.xyxy.cpu().numpy()  # VOC format
+                
+                # Convert VOC to COCO (x1, y1, w, h) - matching single function
+                person_boxes_coco = person_boxes_voc.copy()
+                person_boxes_coco[:, 2] = person_boxes_coco[:, 2] - person_boxes_coco[:, 0]  # w = x2 - x1
+                person_boxes_coco[:, 3] = person_boxes_coco[:, 3] - person_boxes_coco[:, 1]  # h = y2 - y1
+                
                 person_scores = result.boxes.conf.cpu().numpy()
             else:
                 # Empty arrays matching your format
