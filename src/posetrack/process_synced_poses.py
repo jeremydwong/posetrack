@@ -354,7 +354,6 @@ def process_synced_mwc_frames_multi_person(
         if set(sync_data['port']) != set(common_ports): continue
 
         # --- Read frames ---
-        # (Keep frame reading logic as is)
         current_frames_pil = {}
         frame_read_success = True
         for _, row in sync_data.iterrows():
@@ -745,15 +744,12 @@ def process_synced_mwc_frames_multi_person_perf(
         caps[port] = cap; video_lengths[port] = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         print(f"Opened video for port {port}: {video_path} ({video_lengths[port]} frames)")
 
-    # --- 6.5. Validate Sync Range vs Video Length ---
+    # CHECK Validate Sync Range vs Video Length 
     all_sync_indices = sorted(frame_history_df['sync_index'].unique())
     sync_range = all_sync_indices[-1] - all_sync_indices[0] + 1  # +1 because both endpoints inclusive
-    
     print(f"\n--- Sync Validation ---")
     print(f"Sync index range: {all_sync_indices[0]} to {all_sync_indices[-1]} ({len(all_sync_indices)} unique indices)")
     print(f"Expected sync range: {sync_range} frames")
-    
-    # Check if sync range matches video lengths (should be exact or very close)
     sync_matches_video = True
     for port in common_ports:
         video_len = video_lengths[port]
@@ -769,6 +765,7 @@ def process_synced_mwc_frames_multi_person_perf(
         print("⚠ Frame alignment validation FAILED - cannot assume sync_index corresponds to video frame positions!")
         print("  This may indicate missing frames at start/end or sync timing issues.")
 
+    # --- 7. Process Synchronized Frames with Batch Processing ---
     active_tracks = []  # List of PersonTrack objects
     next_track_id = 0
     all_results_by_person = {}  # {person_id: [results]}
@@ -777,7 +774,6 @@ def process_synced_mwc_frames_multi_person_perf(
     all_cameras_by_person = {}  # {person_id: [camera_info]} for diagnostic purposes
     debug_frames = {}  # Store first frame for debugging
 
-    # --- 7. Process Synchronized Frames with Batch Processing ---
     all_sync_indices = sorted(frame_history_df['sync_index'].unique())
     start_time = time.time()
 
@@ -1004,7 +1000,7 @@ def process_synced_mwc_frames_multi_person_perf(
                     })
                     
                     # Project 3D keypoints to 2D pixel coordinates for all cameras
-                    pixel_coords = project_keypoints_to_all_cameras(
+                    pixel_coords = project_keypoints_to_all_cameras_ultrafast(
                         candidate['keypoints_3d'], projection_matrices, common_ports, port_to_cam_index
                     )
                     all_pixel_coords_by_person[person_id].append({

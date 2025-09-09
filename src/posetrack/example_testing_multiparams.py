@@ -20,6 +20,6 @@ calib_type = 'mwc'
 
 pt.process_synced_mwc_frames_multi_person_perf(frame_history_csv_path, calibration_path, video_dir, output_path, model_dir=model_dir,
     detector_dir=detector_dir, calib_type=calib_type, skip_sync_indices=1, person_confidence=0.1,
-    keypoint_confidence=0.1, device_name="mps",verbose_debug=False, override_views_used=[(0,2)],batch_size=32)
+    keypoint_confidence=0.1, device_name="mps",verbose_debug=False, override_views_used=[(0,2)],batch_size=16)
 
 pt.project_poses_to_video(os.path.dirname(output_path), port_number=0, output_video_name="detected_people.mp4")
