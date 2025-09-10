@@ -15,12 +15,10 @@ from .cs_parse import (
     parse_calibration_fmc)
 
 from .process_synced_poses import (
-    wrap_process_synced_mwc_frames,
-    process_synced_mwc_frames,
-    wrap_process_synced_mwc_frames_multi_person,
-    process_synced_mwc_frames_multi_person, 
     batch_process_subfolders,
     process_synced_mwc_frames_multi_person_perf)
+
+from .libwalk import(extract_frames)
 
 from .processed_visualizations import (
     read_posetrack_csv,

@@ -23,8 +23,9 @@ from .libwalk import quick_rotation_matrix
 
     # --- Multi-Person Tracking State ---
 class PersonTrack:
-    def __init__(self, track_id, keypoints_3d, sync_index, hip_indices, views_used=None, track_frames_til_lost_patience = 10, min_keypoints_for_com=2):
-        self.id = track_id
+    def __init__(self, person_id, track_id, keypoints_3d, sync_index, hip_indices, views_used=None, track_frames_til_lost_patience = 10, min_keypoints_for_com=2):
+        self.track_id = track_id
+        self.person_id = person_id
         self.keypoints_3d_history = [keypoints_3d]  # List of 3D keypoints over time
         self.views_used_history = [views_used] if views_used is not None else []  # List of views_used over time
         self.last_seen_sync = sync_index
@@ -200,423 +201,9 @@ def plot_debug_keypoints(debug_frames, all_pixel_coords_by_person, common_ports,
     plt.tight_layout()
     plt.show()
 
-def process_synced_mwc_frames_multi_person(
-    frame_history_csv_path, calibration_path, video_dir, output_path, model_dir=LOCAL_SP_DIR,
-    detector_dir=LOCAL_DET_DIR, calib_type='mwc', skip_sync_indices=1, person_confidence=0.3,
-    keypoint_confidence=0.1, device_name="auto",
-    # --- Tracking parameters ---
-    max_persons=2,  # Maximum number of persons to track
-    com_distance_threshold=0.3,  # meters - minimum distance between COMs to be different people
-    track_frames_til_lost_patience=10,  # frames to wait before considering a track lost
-    min_keypoints_for_com=2,  # minimum valid hip keypoints needed to compute COM
-    hip_indices=(11, 12),  # COCO format: left hip, right hip
-    epipolar_threshold=10,  # pixels - max distance from epipolar line
-    reprojection_error_threshold=50,  # pixels - max reprojection error after triangulation
-    min_views_for_detection=2,  # minimum camera views to confirm a person
-    iou_threshold=0.3,  # for matching bounding boxes across views
-    temporal_smoothing_window=5,  # frames for temporal consistency
-    min_track_length=5,  # minimum frames before considering a track valid
-    max_com_velocity=2.0,  # m/s - maximum reasonable COM velocity between frames
-    verbose_debug=False,  # Enable debugging visualization for first frame
-    override_views_used=None,  # Optional list of view combinations to prioritize instead of previous frame
-    ):
-    """Processes synchronized frames with multi-person 3D tracking using COM-based matching."""
-
-    # --- 1. Setup Device (same as before) ---
-    if device_name == "auto":
-        if torch.backends.mps.is_available() and torch.backends.mps.is_built(): device = "mps"
-        elif torch.cuda.is_available(): device = "cuda"
-        else: device = "cpu"
-    else:
-        device = device_name
-        if device == "mps" and (not torch.backends.mps.is_available() or not torch.backends.mps.is_built()): 
-            print("Warn: MPS unavailable."); device = "cpu"
-        elif device == "cuda" and not torch.cuda.is_available(): 
-            print("Warn: CUDA unavailable."); device = "cpu"
-    print(f"Using device: {device}")
-
-    # --- 2. Load Frame History & Derive 0-Based Index ---
-    # (Keep as is)
-    print(f"Loading frame history from: {frame_history_csv_path}")
-    try:
-        frame_history_df = pd.read_csv(frame_history_csv_path)
-        frame_history_df['sync_index'] = frame_history_df['sync_index'].astype(int)
-        frame_history_df['port'] = frame_history_df['port'].astype(int)
-        frame_history_df['frame_time'] = frame_history_df['frame_time'].astype(float)
-        frame_history_df = frame_history_df.sort_values(by=['port', 'frame_time'])
-        frame_history_df['derived_frame_index'] = frame_history_df.groupby('port')['frame_time'].rank(method='min').astype(int) - 1
-    except Exception as e: print(f"Error reading/processing frame history CSV: {e}"); return
-    print(f"Found {frame_history_df['sync_index'].nunique()} unique sync indices.")
-    print(f"Ports found: {sorted(frame_history_df['port'].unique())}")
-
-
-    # --- 3. Load Calibration & Filter ---
-    # (Keep as is)
-    print(f"Loading calibration ({calib_type}) from: {calibration_path}")
-    if calib_type.lower() == 'mwc': camera_params = parse_calibration_mwc(calibration_path)
-    elif calib_type.lower() == 'fmc': camera_params = parse_calibration_fmc(calibration_path)
-    else: print(f"Error: Invalid calib type '{calib_type}'."); return
-    if not camera_params: print("Error: Failed to load camera calibration."); return
-    print(f"Loaded {len(camera_params)} cameras initially.")
-    port_to_cam_index={}; calibration_ports=set()
-    for idx, params in enumerate(camera_params):
-        port = params.get('port')
-        if port is not None: port_to_cam_index[port] = idx; calibration_ports.add(port)
-        else:
-            try: inferred_port = int(params.get('name', f'cam_{idx}').split('_')[-1]); port_to_cam_index[inferred_port] = idx; calibration_ports.add(inferred_port)
-            except ValueError: print(f"Warn: Cannot determine port for camera index {idx}.")
-    csv_ports = set(frame_history_df['port'].unique())
-    if not csv_ports.issubset(calibration_ports): print(f"Warn: Ports mismatch CSV:{csv_ports} vs Calib:{calibration_ports}.")
-    common_ports = sorted(list(csv_ports.intersection(calibration_ports)))
-    print(f"Using common ports for processing: {common_ports}")
-    if len(common_ports) < 2: print("Error: Need >= 2 common ports."); return
-    
-    filtered_cam_params=[]; filtered_port_map={}; new_idx=0
-    for port in common_ports: 
-        original_idx = port_to_cam_index[port]
-        filtered_cam_params.append(camera_params[original_idx])
-        filtered_port_map[port] = new_idx
-        new_idx += 1
-    
-    camera_params = filtered_cam_params; port_to_cam_index = filtered_port_map; num_cameras = len(camera_params)
-    print(f"Filtered calibration to {num_cameras} cameras.")
-
-    # --- 4. Calculate Projection Matrices ---
-    # (Keep as is)
-    print("Calculating projection matrices...")
-    projection_matrices = calculate_projection_matrices(camera_params)
-    if len(projection_matrices) != num_cameras: print("Error: Proj matrix count mismatch."); return
-
-    # --- 5. Load Models ---
-    # (Keep as is)
-    print("Loading detection and pose estimation models...")
-    try:
-        person_processor, person_model, pose_processor, pose_model = load_models(detect_path=detector_dir, pose_model_path=model_dir, device=device)
-    except Exception as e: print(f"Error loading models: {e}"); return
-
-    # --- 6. Open Video Files ---
-    # (Keep as is, including getting video_lengths)
-    print("Opening video capture for required ports...")
-    caps = {}; video_lengths = {}
-    for port in common_ports:
-        video_path = os.path.join(video_dir, f"port_{port}.mp4")
-        if not os.path.exists(video_path): print(f"Error: Vid not found: {video_path}"); [c.release() for c in caps.values()]; return
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened(): print(f"Error: Cannot open vid: {video_path}"); [c.release() for c in caps.values()]; return
-        caps[port] = cap; video_lengths[port] = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        print(f"Opened video for port {port}: {video_path} ({video_lengths[port]} frames)")
-
-    # --- 6.5. Validate Sync Range vs Video Length ---
-    all_sync_indices = sorted(frame_history_df['sync_index'].unique())
-    sync_range = all_sync_indices[-1] - all_sync_indices[0] + 1  # +1 because both endpoints inclusive
-    
-    print(f"\n--- Sync Validation ---")
-    print(f"Sync index range: {all_sync_indices[0]} to {all_sync_indices[-1]} ({len(all_sync_indices)} unique indices)")
-    print(f"Expected sync range: {sync_range} frames")
-    
-    # Check if sync range matches video lengths (should be exact or very close)
-    sync_matches_video = True
-    for port in common_ports:
-        video_len = video_lengths[port]
-        if abs(sync_range - video_len) > 1:  # Allow only 1 frame difference
-            print(f"WARNING: Port {port} video length ({video_len}) doesn't match sync range ({sync_range})")
-            sync_matches_video = False
-        else:
-            print(f"Port {port}: sync range ({sync_range}) matches video length ({video_len}) ✓")
-    
-    if sync_matches_video:
-        print("✓ Frame alignment validation PASSED - videos appear to share first and last frames with sync data")
-    else:
-        print("⚠ Frame alignment validation FAILED - cannot assume sync_index corresponds to video frame positions!")
-        print("  This may indicate missing frames at start/end or sync timing issues.")
-
-    active_tracks = []  # List of PersonTrack objects
-    next_track_id = 0
-    all_results_by_person = {}  # {person_id: [results]}
-    all_pixel_coords_by_person = {}  # {person_id: [pixel_coords]} for each port
-    previous_views_used = []  # Track views_used from previous frame for continuity
-    all_cameras_by_person = {}  # {person_id: [camera_info]} for diagnostic purposes
-    debug_frames = {}  # Store first frame for debugging
-
-    # --- 7. Process Synchronized Frames ---
-    all_sync_indices = sorted(frame_history_df['sync_index'].unique())
-    start_time = time.time()
-
-    print(f"Starting multi-person processing for {len(all_sync_indices)} sync indices...")
-    sync_index_counter = 0
-    
-    for sync_index in tqdm(all_sync_indices, desc="Processing Sync Indices"):
-        sync_index_counter += 1
-        if (sync_index_counter - 1) % skip_sync_indices != 0: 
-            continue
-
-        sync_data = frame_history_df[frame_history_df['sync_index'] == sync_index]
-        if set(sync_data['port']) != set(common_ports): continue
-
-        # --- Read frames ---
-        current_frames_pil = {}
-        frame_read_success = True
-        for _, row in sync_data.iterrows():
-            port = row['port']
-            frame_idx_to_read = row['derived_frame_index']
-            try: frame_idx_int = int(frame_idx_to_read)
-            except (ValueError, TypeError): print(f"Warn: Invalid derived index '{frame_idx_to_read}' p{port} s{sync_index}"); frame_read_success = False; break
-            cap = caps.get(port); total_frames = video_lengths.get(port, -1)
-            if cap is None or total_frames == -1: print(f"CritErr: No capture/len p{port}"); frame_read_success = False; break
-            if not (0 <= frame_idx_int < total_frames): print(f"Warn: Idx {frame_idx_int} out of bounds (0-{total_frames-1}) p{port} s{sync_index}"); frame_read_success = False; break
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx_int)
-            ret, frame = cap.read()
-            if not ret: print(f"Warn: Failed read idx {frame_idx_int} p{port} s{sync_index}"); frame_read_success = False; break
-            current_frames_pil[port] = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        if not frame_read_success: continue
-
-        # --- Detect and estimate poses in all views ---
-        view_detections = {}  # {port: [(confidence, person_data), ...]} sorted by confidence
-        
-        for port in common_ports:
-            image = current_frames_pil[port]
-            person_boxes_voc, person_boxes_coco, person_scores = detect_persons(
-                image, person_processor, person_model, device, person_confidence
-            )
-            
-            if person_boxes_coco.size == 0: 
-                view_detections[port] = []
-                continue
-
-            all_keypoints_2d, all_keypoint_scores = estimate_poses(
-                image, person_boxes_coco, pose_processor, pose_model, device
-            )
-
-            port_detections = []
-            
-            for person_idx in range(len(all_keypoints_2d)):
-                kps_2d, scores_2d = all_keypoints_2d[person_idx], all_keypoint_scores[person_idx]
-                detection_confidence = person_scores[person_idx]  # Use detection confidence
-                
-                valid_kps_view = []
-                
-                # Process keypoints
-                for kp_idx in range(len(kps_2d)):
-                    kp, score = kps_2d[kp_idx], scores_2d[kp_idx]
-                    if score >= keypoint_confidence:
-                        valid_kps_view.append([kp[0], kp[1], score])
-                    else:
-                        valid_kps_view.append([np.nan, np.nan, score])
-                
-                # Calculate 2D hip center for tracking
-                com_2d = calculate_2d_com(valid_kps_view, hip_indices)
-                if com_2d is None:
-                    #print text warning to screen
-                    print(f"Warn: No valid hips for COM p:{port} s {sync_index} person{person_idx}")
-                    # try to use only 1 hip
-                    com_2d = calculate_2d_com(valid_kps_view, (hip_indices[0], hip_indices[0]))
-                    if com_2d is None:
-                        com_2d = [np.nan, np.nan]
-                        print(f"Warn: No valid single hips for COM p{port} s{sync_index} person{person_idx}")
-                        continue
-
-                person_data = {
-                    'keypoints': np.array(valid_kps_view),
-                    'com_2d': com_2d,
-                    'confidence': detection_confidence
-                }
-                
-                
-                # port_detections.append((detection_confidence, person_data))
-                port_detections.append(person_data)
-
-            # Sort by confidence (highest first)
-            view_detections[port] = port_detections
-
-        groups = group_detections_across_views_bipartite_full(view_detections, None, 
-                                           projection_matrices, port_to_cam_index,
-                                           camera_params, epipolar_threshold=epipolar_threshold)
-        # or epipolar:
-        # group_detections_epipolar(view_detections, None,
-        #                          projection_matrices, port_to_cam_index,
-        #                          camera_params, epipolar_threshold=30)
-        
-        # --- Generate 3D candidates using all possible combinations ---
-        candidate_3d_groups = generate_3d_candidates_from_groups(
-            groups, port_to_cam_index, camera_params, projection_matrices, hip_indices
-        )
-        
-        # --- Associate 3D candidates with existing tracks ---
-        track_assignments, unused_3d_groups = assign_3d_candidates_to_tracks(
-            active_tracks, candidate_3d_groups, 0.15, default_views=override_views_used
-        )
-        
-        # new code to skip bad frames:
-        # Check if this is a bad frame (no successful assignments)
-        if len(active_tracks) > 0 and not track_assignments:
-            print(f"Bad frame detected at sync {sync_index}: no tracks matched")
-            
-            # Just increment lost counters for all tracks and skip the rest of the updating. 
-            for track in active_tracks:
-                track.increment_lost_counter()
-                if not track.is_active:
-                    print(f"Lost track of person {track.id} at sync {sync_index}")
-            
-            # Remove inactive tracks
-            active_tracks = [t for t in active_tracks if t.is_active]
-            
-            # Continue to next frame without updating any results
-            continue
-
-        # Update existing tracks.
-        # super confusing because of the sheer number of lists we are keeping track of. 
-        # track list: a list of the currently-tracked PersonTrack. this has a track_id.  
-        # grp list: a list of lists! each list has a list of clumped together people.
-        # within-grp- candidate list-> these are the list-inside-the-grp list. 
-        
-        for track_id,curtuple in track_assignments.items():
-            if curtuple is not None:
-                (grp_idx, candidate_idx) = curtuple
-    
-            if candidate_idx is not None:
-                candidate = candidate_3d_groups[grp_idx][candidate_idx]
-                if len(active_tracks) < max_persons:
-                    new_track = PersonTrack(track_id, candidate_3d_groups[grp_idx][candidate_idx]['keypoints_3d'], sync_index,hip_indices,candidate['views'])
-                    active_tracks.append(new_track) 
-                    print("added new track")
-                    #track_idx = len(active_tracks)
-                else:
-                    # find which track to update
-                    track_idx = None
-                    for i, t in enumerate(active_tracks):
-                        if t.id == track_id:
-                            track_idx = i
-                            break
-                    if track_idx is not None:
-                        active_tracks[track_idx].update(candidate['keypoints_3d'], sync_index, candidate['views'])
-                    else:
-                        print(f"Warn: Track ID {track_id} not found in active tracks, and we're full! Continue-ing.")
-                        continue
-
-                #
-                person_id = active_tracks[track_id].id
-                if person_id not in all_results_by_person:
-                    all_results_by_person[person_id] = []
-                if person_id not in all_pixel_coords_by_person:
-                    all_pixel_coords_by_person[person_id] = []
-                if person_id not in all_cameras_by_person:
-                    all_cameras_by_person[person_id] = []
-                    
-                kps_3d_list = [[np.nan]*3 if kp is None else kp.tolist() 
-                               for kp in candidate['keypoints_3d']]
-                all_results_by_person[person_id].append({
-                    'sync_index': sync_index,
-                    'person_id': person_id,
-                    'keypoints_3d': kps_3d_list
-                })
-                
-                # Project 3D keypoints to 2D pixel coordinates for all cameras; we will output these later. 
-                # note: this is somewhat misleading because we do not necessarily use all the cameras when we make estimates. 
-                # TODO: update these outputs to add an additional column for cameras used.
-                pixel_coords = project_keypoints_to_all_cameras(
-                    candidate['keypoints_3d'], projection_matrices, common_ports, port_to_cam_index
-                )
-                all_pixel_coords_by_person[person_id].append({
-                    'sync_index': sync_index,
-                    'person_id': person_id,
-                    'pixel_coords': pixel_coords
-                })
-                
-                # Store camera information for diagnostics
-                all_cameras_by_person[person_id].append({
-                    'sync_index': sync_index,
-                    'person_id': person_id,
-                    'cameras_used': candidate_3d_groups[grp_idx][candidate_idx]['views']
-                })
-                
-        # Update lost counters for unmatched tracks
-        for i, track in enumerate(active_tracks):
-            if i not in track_assignments or track_assignments[i] is None:
-                track.increment_lost_counter()
-                if not track.is_active:
-                    print(f"Lost track of person {track.id} at sync {sync_index}")
-        
-        # Update previous_views_used with views from candidates that were actually used
-        current_views_used = []
-        for track_idx, tuple_idxs in track_assignments.items():
-            grp_idx = tuple_idxs[0]
-            candidate_idx = tuple_idxs[1]
-            if candidate_idx is not None:
-                candidate = candidate_3d_groups[grp_idx][candidate_idx]
-                current_views_used.append(candidate['views'])
-        
-        # # Also add views from new tracks that were created
-        # for candidate_idx in used_candidates:
-        #     if candidate_idx < len(candidate_3d_groups):
-        #         candidate = candidate_3d_groups[candidate_idx]
-        #         # Only add if not already added from track assignments
-        #         if candidate['views_used'] not in current_views_used:
-        #             current_views_used.append(candidate['views_used'])
-        
-        previous_views_used = current_views_used
-        
-        # Remove inactive tracks
-        active_tracks = [t for t in active_tracks if t.is_active]
-        
-        # Store first frame for debugging if enabled
-        if verbose_debug and sync_index == all_sync_indices[0]:
-            debug_frames = current_frames_pil.copy()
-
-    # --- 8. Cleanup and Save Results ---
-    print("\nReleasing video captures...")
-    [cap.release() for cap in caps.values()]
-    end_time = time.time()
-    print(f"Processing finished in {end_time - start_time:.2f} seconds.")
-
-    # Save results for each person
-    base_output_path = output_path
-    
-    for person_id, results in all_results_by_person.items():
-        if not results:
-            continue
-            
-        print(f"\nSaving results for Person {person_id} ({len(results)} frames)...")
-        
-        # Define output filenames for this person
-        person_csv_path = f"{base_output_path}_person{person_id}.csv"
-        person_pickle_path = f"{base_output_path}_person{person_id}.pkl"
-        
-        # Save pickle
-        try:
-            with open(person_pickle_path, 'wb') as f_pkl:
-                pickle.dump(results, f_pkl)
-            print(f"Saved pickle: {person_pickle_path}")
-        except Exception as e:
-            print(f"Error saving pickle for person {person_id}: {e}")
-        
-        # Save CSV (same format as original)
-        save_person_csv(results, person_csv_path, expected_num_kps=52)
-        
-        # Save pixel coordinates CSV for each port
-        if person_id in all_pixel_coords_by_person:
-            pixel_results = all_pixel_coords_by_person[person_id]
-            for port in common_ports:
-                pixel_csv_path = f"{base_output_path}_person{person_id}_pixelcoords_port_{port}.csv"
-                save_pixel_coords_csv(pixel_results, pixel_csv_path, expected_num_kps=52, port=port)
-        
-        # Save camera information CSV for diagnostics
-        if person_id in all_cameras_by_person:
-            camera_results = all_cameras_by_person[person_id]
-            cameras_csv_path = f"{base_output_path}_person{person_id}_cameras.csv"
-            save_cameras_csv(camera_results, cameras_csv_path)
-    
-    # Debug visualization if enabled
-    if verbose_debug and debug_frames and all_pixel_coords_by_person:
-        print("\nGenerating debug visualization...")
-        plot_debug_keypoints(debug_frames, all_pixel_coords_by_person, common_ports, all_sync_indices[0])
-    
-    print(f"\nTotal persons tracked: {len(all_results_by_person)}")
-    return all_results_by_person
-
-
 def process_synced_mwc_frames_multi_person_perf(
     frame_history_csv_path, calibration_path, video_dir, output_path, model_dir=LOCAL_SP_DIR,
-    detector_dir=LOCAL_DET_DIR, calib_type='mwc', skip_sync_indices=1, person_confidence=0.3,
+    detector_dir=LOCAL_DET_DIR, calib_type='mwc', skip_sync_indices=1, person_confidence=0.1,
     keypoint_confidence=0.1, device_name="auto",
     # --- Tracking parameters ---
     max_persons=2,  # Maximum number of persons to track
@@ -638,7 +225,7 @@ def process_synced_mwc_frames_multi_person_perf(
     ):
     """Processes synchronized frames with multi-person 3D tracking using COM-based matching with batch processing."""
 
-    # --- 1. Setup Device (same as before) ---
+    # --- 1. Setup Device ---
     if device_name == "auto":
         if torch.backends.mps.is_available() and torch.backends.mps.is_built(): device = "mps"
         elif torch.cuda.is_available(): device = "cuda"
@@ -766,13 +353,14 @@ def process_synced_mwc_frames_multi_person_perf(
         print("  This may indicate missing frames at start/end or sync timing issues.")
 
     # --- 7. Process Synchronized Frames with Batch Processing ---
-    active_tracks = []  # List of PersonTrack objects
+    active_tracks:list[PersonTrack] = []  # List of PersonTrack objects
     next_track_id = 0
     all_results_by_person = {}  # {person_id: [results]}
     all_pixel_coords_by_person = {}  # {person_id: [pixel_coords]} for each port
     previous_views_used = []  # Track views_used from previous frame for continuity
     all_cameras_by_person = {}  # {person_id: [camera_info]} for diagnostic purposes
     debug_frames = {}  # Store first frame for debugging
+    next_person_id = 0
 
     all_sync_indices = sorted(frame_history_df['sync_index'].unique())
     start_time = time.time()
@@ -951,7 +539,7 @@ def process_synced_mwc_frames_multi_person_perf(
                 for track in active_tracks:
                     track.increment_lost_counter()
                     if not track.is_active:
-                        print(f"Lost track of person {track.id} at sync {sync_index}")
+                        print(f"Lost track of person {track.person_id} at sync {sync_index}")
                 
                 # Remove inactive tracks
                 active_tracks = [t for t in active_tracks if t.is_active]
@@ -959,69 +547,96 @@ def process_synced_mwc_frames_multi_person_perf(
                 # Continue to next frame without updating any results
                 continue
 
-            # Update existing tracks
-            for track_id,curtuple in track_assignments.items():
-                if curtuple is not None:
-                    (grp_idx, candidate_idx) = curtuple
-                
-                if candidate_idx is not None:
-                    candidate = candidate_3d_groups[grp_idx][candidate_idx]
-                    if len(active_tracks) < max_persons:
-                        new_track = new_track = PersonTrack(track_id, candidate_3d_groups[grp_idx][candidate_idx]['keypoints_3d'], sync_index,hip_indices,views_used=candidate['views'])
-                        active_tracks.append(new_track)
-                    else:
-                        # find which track to update
-                        track_idx = None
-                        for i, t in enumerate(active_tracks):
-                            if t.id == track_id:
-                                track_idx = i
-                                break
-                        if track_idx is not None:
-                            active_tracks[track_idx].update(candidate['keypoints_3d'], sync_index, candidate['views'])
-                        else:
-                            print(f"Warn: Track ID {track_id} not found in active tracks.")
-                            continue
+            # Update existing tracks or create new ones
+            for track_id, curtuple in track_assignments.items():
 
-                    # Store result
-                    person_id = active_tracks[track_id].id
-                    if person_id not in all_results_by_person:
-                        all_results_by_person[person_id] = []
-                    if person_id not in all_pixel_coords_by_person:
-                        all_pixel_coords_by_person[person_id] = []
-                    if person_id not in all_cameras_by_person:
-                        all_cameras_by_person[person_id] = []
-                        
-                    kps_3d_list = [[np.nan]*3 if kp is None else kp.tolist() 
-                                   for kp in candidate['keypoints_3d']]
-                    all_results_by_person[person_id].append({
-                        'sync_index': sync_index,
-                        'person_id': person_id,
-                        'keypoints_3d': kps_3d_list
-                    })
+                if curtuple is None:
+                    continue
                     
-                    # Project 3D keypoints to 2D pixel coordinates for all cameras
-                    pixel_coords = project_keypoints_to_all_cameras_ultrafast(
-                        candidate['keypoints_3d'], projection_matrices, common_ports, port_to_cam_index
+                grp_idx, candidate_idx = curtuple
+                
+                if candidate_idx is None:
+                    continue
+                candidate = candidate_3d_groups[grp_idx][candidate_idx]
+                existing_track = None
+
+                # Update existing track or create new one
+                if track_id < len(active_tracks):
+                    existing_track = active_tracks[track_id]    
+                    # Update existing track
+                    existing_track.update(
+                        candidate['keypoints_3d'], 
+                        sync_index, 
+                        candidate['views']
                     )
-                    all_pixel_coords_by_person[person_id].append({
-                        'sync_index': sync_index,
-                        'person_id': person_id,
-                        'pixel_coords': pixel_coords
-                    })
-                    
-                    # Store camera information for diagnostics
-                    all_cameras_by_person[person_id].append({
-                        'sync_index': sync_index,
-                        'person_id': person_id,
-                        'cameras_used': candidate_3d_groups[grp_idx][candidate_idx]['views']
-                    })
-                    
+                else:
+                    # Create new track only if we haven't hit the max concurrent tracks
+                    if len(active_tracks) < max_persons:
+                        new_track = PersonTrack(
+                            person_id=next_person_id,  # New unique person ID
+                            track_id=track_id,  # Track ID for continuity
+                            keypoints_3d=candidate['keypoints_3d'],
+                            sync_index=sync_index,
+                            hip_indices=hip_indices,
+                            views_used=candidate['views'],
+                            track_frames_til_lost_patience=30
+                        )
+                        active_tracks.append(new_track)
+                        next_person_id += 1  # Increment for next new person
+                    else:
+                        print(f"Warning: Cannot create new track {track_id}, max persons ({max_persons}) reached")
+                        continue
+                
+                # Get the person_id from the track (whether new or existing)
+                track = existing_track if existing_track else new_track
+                person_id = track.person_id  # This is the unique person identifier
+                
+                # Store results using person_id
+                if person_id not in all_results_by_person:
+                    all_results_by_person[person_id] = []
+                if person_id not in all_pixel_coords_by_person:
+                    all_pixel_coords_by_person[person_id] = []
+                if person_id not in all_cameras_by_person:
+                    all_cameras_by_person[person_id] = []
+                
+                # Rest of storage logic remains the same...
+                kps_3d_list = [[np.nan]*3 if kp is None else kp.tolist() 
+                            for kp in candidate['keypoints_3d']]
+                all_results_by_person[person_id].append({
+                    'sync_index': sync_index,
+                    'person_id': person_id,
+                    'keypoints_3d': kps_3d_list
+                })
+                
+                # Project and store pixel coordinates...
+                pixel_coords = project_keypoints_to_all_cameras_ultrafast(
+                    candidate['keypoints_3d'], 
+                    projection_matrices, 
+                    common_ports, 
+                    port_to_cam_index
+                )
+                all_pixel_coords_by_person[person_id].append({
+                    'sync_index': sync_index,
+                    'person_id': person_id,
+                    'pixel_coords': pixel_coords
+                })
+                
+                # Store camera information...
+                all_cameras_by_person[person_id].append({
+                    'sync_index': sync_index,
+                    'person_id': person_id,
+                    'cameras_used': candidate['views']
+                })
+
             # Update lost counters for unmatched tracks
-            for i, track in enumerate(active_tracks):
-                if i not in track_assignments or track_assignments[i] is None:
+            matched_track_ids = {track_id for track_id, assignment in track_assignments.items() 
+                                if assignment is not None and assignment[1] is not None}
+
+            for track in active_tracks:
+                if track.track_id not in matched_track_ids:
                     track.increment_lost_counter()
                     if not track.is_active:
-                        print(f"Lost track of person {track.id} at sync {sync_index}")
+                        print(f"Lost track of person {track.person_id} (track {track.track_id}) at sync {sync_index}")
             
             # Update previous_views_used with views from candidates that were actually used
             current_views_used = []
@@ -1210,81 +825,21 @@ def calculate_triangulation_quality(kps_to_triangulate, keypoints_3d, projection
     
     return quality
 
-def group_detections_epipolar(port_detections, view_results, 
-                                 projection_matrices, port_to_cam_index, 
-                                 camera_params, epipolar_threshold=30):
+def assign_3d_candidates_to_tracks(active_tracks:list[PersonTrack], candidate_groups, max_distance=0.5, default_views=None):
     """
-    Group person detections across views using epipolar constraints.
-    returns
-    """
-    person_groups = []
-    # note: cams are 0:len(port_detections); ports can be discontinuous file labels matching video files, like port_3.mp4
-    ports = list(port_detections.keys())
-    
-    if len(ports) < 2:
-        return person_groups
-    
-    # Build cost matrix for Hungarian algorithm
-    all_detections = []
-    detection_to_view = []
-    
-    for port in ports:
-        for person_idx, person_data in enumerate(port_detections[port]):
-            com_2d = person_data['com_2d']
-            all_detections.append((port, person_idx, com_2d))
-            detection_to_view.append(port)
-    
-    n_detections = len(all_detections)
-    
-    # For each pair of views, calculate epipolar distances
-    epipolar_distances = {}
-    
-    for i in range(len(ports)):
-        for j in range(i+1, len(ports)):
-            port1, port2 = ports[i], ports[j]
-            cam_idx1 = port_to_cam_index[port1]
-            cam_idx2 = port_to_cam_index[port2]
-            
-            # Calculate fundamental matrix between views
-            F = calculate_fundamental_matrix(
-                projection_matrices[cam_idx1], 
-                projection_matrices[cam_idx2]
-            )
-            
-            # Calculate epipolar distances for all detection pairs
-            for det1_idx, (p1, idx1, com1) in enumerate(all_detections):
-                if p1 != port1:
-                    continue
-                    
-                for det2_idx, (p2, idx2, com2) in enumerate(all_detections):
-                    if p2 != port2:
-                        continue
-                    
-                    # Calculate distance from com2 to epipolar line of com1
-                    dist = point_to_epipolar_line_distance(com1, com2, F)
-                    epipolar_distances[(det1_idx, det2_idx)] = dist
-    
-    # Use graph-based clustering or Hungarian algorithm to find consistent groups
-    groups = cluster_with_epipolar_constraints_fixed(
-        all_detections, epipolar_distances, epipolar_threshold
-    )
-    
-    return groups
-
-
-def assign_3d_candidates_to_tracks(active_tracks, candidate_groups, max_distance=0.5, default_views=None):
-    """
-    Assign candidate groups to tracks, selecting the best candidate from each group
-    that matches the track's view constraint.
+    Assign candidate that matches existing view for each track by taking the detected person closest to each of the tracks.
     
     Args:
         active_tracks: List of active tracks
         candidate_groups: List returned by generate_3d_candidates_from_groups,
                          where each element represents one person with multiple view combinations
         max_distance: Maximum distance for any match
-    
+        
     Returns:
-        assignments: List of tuples, indexed by TRACK_ID. 
+        assignments (tuple): which group, and which candidate in that group. 
+            If n_tracks was 0, this will be ngroups long.
+            If n_tracks was 1, this will be 1 long, and unassigned groups will contain the other candidates grouping indices.
+            If n_tracks was 2, this will be 2 long, and unassigned groups will contain the other candidates grouping indices.
         unassigned_groups: List of group indices not assigned to any track
     """
     import numpy as np
@@ -1312,16 +867,14 @@ def assign_3d_candidates_to_tracks(active_tracks, candidate_groups, max_distance
                     assignments[i] = (i,j)
         return assignments, None                
     
-    # Condition: tracks exist!
     # Build cost matrix: tracks x groups
-    # For each (track, group) pair, find the best matching candidate within that group
+    # which track should be paired with which group? 
     HI = 1000.0
-    cost_matrix = np.full((n_tracks, n_groups), HI)
+    cost_matrix = np.full((n_tracks, n_groups), HI) # cost matrix assigns a group
     best_candidate_per_cell = {}  # (track_idx, group_idx) -> candidate_idx
     
-    track_ids = [track.id for track in active_tracks]  # Extract  track IDs
-
-    for track_enum, track in enumerate(active_tracks):
+    # populate the cost_matrix that ma 
+    for i_track, track in enumerate(active_tracks):
         track_com = track.get_com_3d()
         track_views = track.get_last_views_used()
         
@@ -1331,7 +884,7 @@ def assign_3d_candidates_to_tracks(active_tracks, candidate_groups, max_distance
         track_views_set = set(track_views)
         
         for group_idx, candidate_list in enumerate(candidate_groups):
-            # Find the best candidate in this group that matches track's views
+            
             best_distance = np.inf
             best_cand_idx = None
             
@@ -1352,8 +905,8 @@ def assign_3d_candidates_to_tracks(active_tracks, candidate_groups, max_distance
                     best_cand_idx = cand_idx
             
             if best_cand_idx is not None:
-                cost_matrix[track_enum, group_idx] = best_distance
-                best_candidate_per_cell[(track_enum, group_idx)] = best_cand_idx
+                cost_matrix[i_track, group_idx] = best_distance
+                best_candidate_per_cell[(i_track, group_idx)] = best_cand_idx
     
     # Solve assignment problem between tracks and groups
     if np.all(cost_matrix == HI):
@@ -1362,64 +915,17 @@ def assign_3d_candidates_to_tracks(active_tracks, candidate_groups, max_distance
     
     track_opt_indices, group_opt_indices = linear_sum_assignment(cost_matrix)
         
-    for track_enum, group_idx in zip(track_opt_indices, group_opt_indices):
-        if cost_matrix[track_enum, group_idx] < max_distance:
+    for i_track, group_idx in zip(track_opt_indices, group_opt_indices):
+        if cost_matrix[i_track, group_idx] < max_distance:
             # Get the specific candidate that was best for this pairing
-            cand_idx = best_candidate_per_cell[(track_enum, group_idx)]
-            assignments[track_ids[track_enum]] = (group_idx, cand_idx)
+            cand_idx = best_candidate_per_cell[(i_track, group_idx)]
+            assignments[i_track] = (group_idx, cand_idx)
             used_groups.add(group_idx)
     
     # Find unassigned groups
     unassigned_groups = [g for g in range(n_groups) if g not in used_groups]
     
     return assignments, unassigned_groups
-
-def assign_tracks_to_detections(active_tracks, new_persons_3d, distance_threshold):
-    """
-    Legacy function - kept for compatibility.
-    Assign existing tracks to new 3D detections based on COM distance.
-    Returns dict: {track_index: detection_index or None}
-    """
-    assignments = {}
-    used_detections = set()
-    
-    # Calculate COM for each new detection
-    new_coms = []
-    for person_3d in new_persons_3d:
-        com = calculate_3d_com_from_keypoints(person_3d, hip_indices=(11, 12))
-        new_coms.append(com)
-    
-    # Assign tracks to detections
-    for track_idx, track in enumerate(active_tracks):
-        track_com = track.get_com_3d(hip_indices)
-        if track_com is None:
-            assignments[track_idx] = None
-            continue
-        
-        best_match_idx = None
-        best_match_dist = float('inf')
-        
-        for det_idx, det_com in enumerate(new_coms):
-            if det_com is None or det_idx in used_detections:
-                continue
-                
-            dist = np.linalg.norm(track_com - det_com)
-            if dist < distance_threshold and dist < best_match_dist:
-                best_match_dist = dist
-                best_match_idx = det_idx
-        
-        if best_match_idx is not None:
-            assignments[track_idx] = best_match_idx
-            used_detections.add(best_match_idx)
-        else:
-            assignments[track_idx] = None
-    
-    return assignments
-
-import numpy as np
-from scipy.optimize import linear_sum_assignment
-from scipy.sparse import csr_matrix
-from scipy.sparse.csgraph import connected_components
 
 def calculate_fundamental_matrix(P1, P2):
     """
@@ -1506,75 +1012,6 @@ def point_to_epipolar_line_distance(point1, point2, F):
     distance = numerator / denominator
     
     return distance
-
-def group_detections_across_views_bipartite_limited(detected_persons_2d, view_results, 
-                                           projection_matrices, port_to_cam_index,
-                                           camera_params, epipolar_threshold=30):
-    """
-    Bipartite matching.
-    inputs:
-    - detected_persons_2d: 2D detections for each view as a list of dict{keypoints,com_2d, confidence}
-    - view_results: Results from each view
-    - projection_matrices: Projection matrices for each camera
-    - port_to_cam_index: Mapping from ports (not necessarily continuous) to camera indices (0:N-1)
-    - camera_params: Camera parameters
-    - epipolar_threshold: Threshold for epipolar constraint
-    """
-    ports = list(detected_persons_2d.keys())
-    if len(ports) < 2:
-        return []
-    
-    # For each pair of views, find optimal matching
-    reference_port = ports[0]
-    reference_detections = detected_persons_2d[reference_port]
-    
-    if not reference_detections:
-        return []
-    
-    # Initialize groups with reference detections
-    groups = [{reference_port: det} for det in reference_detections] #but i dont' know what the form of det was originally.
-
-    # Match with each other view
-    for other_port in ports[1:]:
-        other_detections = detected_persons_2d[other_port]
-        if not other_detections:
-            continue
-        
-        # Calculate fundamental matrix
-        cam_idx1 = port_to_cam_index[reference_port]
-        cam_idx2 = port_to_cam_index[other_port]
-        F = calculate_fundamental_matrix(
-            projection_matrices[cam_idx1],
-            projection_matrices[cam_idx2]
-        )
-        
-        # Build cost matrix
-        n_ref = len(reference_detections)
-        n_other = len(other_detections)
-        cost_matrix = np.full((n_ref, n_other), 1000.0)  # High cost for non-matches
-        
-        for i, cur_refdet in enumerate(reference_detections):
-            ref_com = cur_refdet['com_2d']
-            for j, cur_othdet in enumerate(other_detections):
-                other_com = cur_othdet['com_2d']
-                dist = point_to_epipolar_line_distance(ref_com, other_com, F)
-                if dist < epipolar_threshold:
-                    cost_matrix[i, j] = dist
-        
-            # Solve assignment problem
-            row_indices, col_indices = linear_sum_assignment(cost_matrix)
-            
-            # Update groups with matches
-            for ref_ind, new_ind in zip(row_indices, col_indices):
-                if cost_matrix[ref_ind, new_ind] < epipolar_threshold:
-                    other_detection = detected_persons_2d[other_port][new_ind]
-                    groups[ref_ind][other_port] = other_detection
-
-    
-    # Filter groups that have minimum views
-    final_groups = [g for g in groups if len(g) >= 2]
-    
-    return final_groups
 
 def group_detections_across_views_bipartite_full(detected_persons_2d, view_results,
                                            projection_matrices, port_to_cam_index,
@@ -1782,422 +1219,6 @@ def save_pixel_coords_csv(pixel_results, csv_path, expected_num_kps, port):
         results_df = pd.DataFrame(csv_rows)
         results_df.to_csv(csv_path, index=False, float_format='%.4f')
         print(f"Saved pixel coordinates CSV: {csv_path}")
-# ---
-
-def wrap_process_synced_mwc_frames(directory_name,model_dir=LOCAL_SP_DIR,
-    detector_dir=LOCAL_DET_DIR, calib_type='mwc', skip_sync_indices=1, person_confidence=0.3,
-    keypoint_confidence=0.1, device_name="auto"):
-    """Wrapper to call the multi-person processing function with default parameters."""
-    csv_path = os.path.join(directory_name, "frame_time_history.csv")
-    calibration_path = os.path.join(directory_name, "config.toml")
-    video_dir = directory_name
-    output_path = os.path.join(directory_name)
-    
-    process_synced_mwc_frames(
-        frame_history_csv_path=csv_path, calibration_path=calibration_path, video_dir=video_dir,
-        output_path=output_path, model_dir=model_dir, detector_dir=detector_dir,
-        calib_type=calib_type, skip_sync_indices=skip_sync_indices,
-        person_confidence=person_confidence, keypoint_confidence=keypoint_confidence,
-        device_name=device_name)    
-
-def wrap_process_synced_mwc_frames_multi_person(directory_name,model_dir=LOCAL_SP_DIR,
-    detector_dir=LOCAL_DET_DIR, calib_type='mwc', skip_sync_indices=1, person_confidence=0.8,
-    keypoint_confidence=0.1, device_name="auto",
-    max_persons=2,  # Maximum number of persons to track
-    com_distance_threshold=0.5,  # meters - minimum distance between COMs to be different people
-    track_frames_til_lost_patience=10,  # frames to wait before considering a track lost
-    min_keypoints_for_com=2,  # minimum valid hip keypoints needed to compute COM
-    hip_indices=(11, 12),  # COCO format: left hip, right hip
-    ):
-    """Wrapper to call the multi-person processing function with default parameters."""
-    
-    process_synced_mwc_frames_multi_person(
-        frame_history_csv_path=os.path.join(directory_name, "frame_time_history.csv"),
-        calibration_path=os.path.join(directory_name, "config.toml"),
-        video_dir=directory_name,
-        output_path=os.path.join(directory_name),
-        model_dir=model_dir,
-        detector_dir=detector_dir,
-        calib_type=calib_type,
-        skip_sync_indices=skip_sync_indices,
-        person_confidence=person_confidence,
-        keypoint_confidence=keypoint_confidence,
-        device_name=device_name,
-        max_persons=max_persons,
-        com_distance_threshold=com_distance_threshold)
-
-def process_synced_mwc_frames(
-    # ... (arguments remain the same) ...
-    frame_history_csv_path, calibration_path, video_dir, output_path, model_dir=LOCAL_SP_DIR,
-    detector_dir=LOCAL_DET_DIR, calib_type='mwc', skip_sync_indices=1, person_confidence=0.3,
-    keypoint_confidence=0.1, device_name="auto",
-    # --- Add tracking parameters ---
-    tracking_max_2d_dist=100, # Max pixels distance for head matching in 2D
-    head_kp_index=0 # Index of the head keypoint (e.g., 0 for Nose)
-    # ---
-    ):
-    """Processes synchronized frames with simplified 3D tracking."""
-
-    # --- 1. Setup Device ---
-    # (Keep as is)
-    if device_name == "auto":
-        if torch.backends.mps.is_available() and torch.backends.mps.is_built(): device = "mps"
-        elif torch.cuda.is_available(): device = "cuda"
-        else: device = "cpu"
-    else:
-        device = device_name
-        if device == "mps" and (not torch.backends.mps.is_available() or not torch.backends.mps.is_built()): print("Warn: MPS unavailable."); device = "cpu"
-        elif device == "cuda" and not torch.cuda.is_available(): print("Warn: CUDA unavailable."); device = "cpu"
-    print(f"Using device: {device}")
-
-
-    # --- 2. Load Frame History & Derive 0-Based Index ---
-    # (Keep as is)
-    print(f"Loading frame history from: {frame_history_csv_path}")
-    try:
-        frame_history_df = pd.read_csv(frame_history_csv_path)
-        frame_history_df['sync_index'] = frame_history_df['sync_index'].astype(int)
-        frame_history_df['port'] = frame_history_df['port'].astype(int)
-        frame_history_df['frame_time'] = frame_history_df['frame_time'].astype(float)
-        frame_history_df = frame_history_df.sort_values(by=['port', 'frame_time'])
-        frame_history_df['derived_frame_index'] = frame_history_df.groupby('port')['frame_time'].rank(method='min').astype(int) - 1
-    except Exception as e: print(f"Error reading/processing frame history CSV: {e}"); return
-    print(f"Found {frame_history_df['sync_index'].nunique()} unique sync indices.")
-    print(f"Ports found: {sorted(frame_history_df['port'].unique())}")
-
-
-    # --- 3. Load Calibration & Filter ---
-    # (Keep as is)
-    print(f"Loading calibration ({calib_type}) from: {calibration_path}")
-    if calib_type.lower() == 'mwc': camera_params = parse_calibration_mwc(calibration_path)
-    elif calib_type.lower() == 'fmc': camera_params = parse_calibration_fmc(calibration_path)
-    else: print(f"Error: Invalid calib type '{calib_type}'."); return
-    if not camera_params: print("Error: Failed to load camera calibration."); return
-    print(f"Loaded {len(camera_params)} cameras initially.")
-    port_to_cam_index={}; calibration_ports=set()
-    for idx, params in enumerate(camera_params):
-        port = params.get('port')
-        if port is not None: port_to_cam_index[port] = idx; calibration_ports.add(port)
-        else:
-            try: inferred_port = int(params.get('name', f'cam_{idx}').split('_')[-1]); port_to_cam_index[inferred_port] = idx; calibration_ports.add(inferred_port)
-            except ValueError: print(f"Warn: Cannot determine port for camera index {idx}.")
-    csv_ports = set(frame_history_df['port'].unique())
-    if not csv_ports.issubset(calibration_ports): print(f"Warn: Ports mismatch CSV:{csv_ports} vs Calib:{calibration_ports}.")
-    common_ports = sorted(list(csv_ports.intersection(calibration_ports)))
-    print(f"Using common ports for processing: {common_ports}")
-    if len(common_ports) < 2: print("Error: Need >= 2 common ports."); return
-    filtered_cam_params=[]; filtered_port_map={}; new_idx=0
-    for port in common_ports: original_idx = port_to_cam_index[port]; filtered_cam_params.append(camera_params[original_idx]); filtered_port_map[port] = new_idx; new_idx += 1
-    camera_params = filtered_cam_params; port_to_cam_index = filtered_port_map; num_cameras = len(camera_params)
-    print(f"Filtered calibration to {num_cameras} cameras.")
-
-    # --- 4. Calculate Projection Matrices ---
-    print("Calculating projection matrices...")
-    projection_matrices = calculate_projection_matrices(camera_params)
-    if len(projection_matrices) != num_cameras: print("Error: Proj matrix count mismatch."); return
-
-    # --- 5. Load Models ---
-    print("Loading detection and pose estimation models...")
-    try:
-        person_processor, person_model, pose_processor, pose_model = load_models(detect_path=detector_dir, pose_model_path=model_dir, device=device)
-    except Exception as e: print(f"Error loading models: {e}"); return
-
-    # --- 6. Open Video Files ---
-    print("Opening video capture for required ports...")
-    caps = {}; video_lengths = {}
-    for port in common_ports:
-        video_path = os.path.join(video_dir, f"port_{port}.mp4")
-        if not os.path.exists(video_path): print(f"Error: Vid not found: {video_path}"); [c.release() for c in caps.values()]; return
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened(): print(f"Error: Cannot open vid: {video_path}"); [c.release() for c in caps.values()]; return
-        caps[port] = cap; video_lengths[port] = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        print(f"Opened video for port {port}: {video_path} ({video_lengths[port]} frames)")
-
-    # --- 6.5. Validate Sync Range vs Video Length ---
-    all_sync_indices = sorted(frame_history_df['sync_index'].unique())
-    sync_range = all_sync_indices[-1] - all_sync_indices[0] + 1  # +1 because both endpoints inclusive
-    
-    print(f"\n--- Sync Validation ---")
-    print(f"Sync index range: {all_sync_indices[0]} to {all_sync_indices[-1]} ({len(all_sync_indices)} unique indices)")
-    print(f"Expected sync range: {sync_range} frames")
-    
-    # Check if sync range matches video lengths (should be exact or very close)
-    sync_matches_video = True
-    for port in common_ports:
-        video_len = video_lengths[port]
-        if abs(sync_range - video_len) > 1:  # Allow only 1 frame difference
-            print(f"WARNING: Port {port} video length ({video_len}) doesn't match sync range ({sync_range})")
-            sync_matches_video = False
-        else:
-            print(f"Port {port}: sync range ({sync_range}) matches video length ({video_len}) ✓")
-    
-    if sync_matches_video:
-        print("✓ Frame alignment validation PASSED - videos appear to share first and last frames with sync data")
-    else:
-        print("⚠ Frame alignment validation FAILED - cannot assume sync_index corresponds to video frame positions!")
-        print("  This may indicate missing frames at start/end or sync timing issues.")
-
-    # --- 7. Process Synchronized Frames ---
-    all_sync_indices = sorted(frame_history_df['sync_index'].unique())
-    results_3d = []
-    start_time = time.time()
-
-    # --- Tracking State ---
-    tracked_person_3d_kps = None # Stores the list of 3D kps [ [x,y,z], [x,y,z], ...] or None
-    tracked_person_id_counter = 0 # Simple counter for assigning IDs
-
-    print(f"Starting processing for {len(all_sync_indices)} sync indices...")
-    sync_index_counter = 0
-    for sync_index in tqdm(all_sync_indices, desc="Processing Sync Indices"):
-
-        sync_index_counter += 1
-        if (sync_index_counter - 1) % skip_sync_indices != 0: continue
-
-        sync_data = frame_history_df[frame_history_df['sync_index'] == sync_index]
-        if set(sync_data['port']) != set(common_ports): continue
-
-        # --- Read frames ---
-        current_frames_pil = {}
-        frame_read_success = True
-        for _, row in sync_data.iterrows():
-            port = row['port']
-            frame_idx_to_read = row['derived_frame_index']
-            try: frame_idx_int = int(frame_idx_to_read)
-            except (ValueError, TypeError): print(f"Warn: Invalid derived index '{frame_idx_to_read}' p{port} s{sync_index}"); frame_read_success = False; break
-            cap = caps.get(port); total_frames = video_lengths.get(port, -1)
-            if cap is None or total_frames == -1: print(f"CritErr: No capture/len p{port}"); frame_read_success = False; break
-            if not (0 <= frame_idx_int < total_frames): print(f"Warn: Idx {frame_idx_int} out of bounds (0-{total_frames-1}) p{port} s{sync_index}"); frame_read_success = False; break
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx_int)
-            ret, frame = cap.read()
-            if not ret: print(f"Warn: Failed read idx {frame_idx_int} p{port} s{sync_index}"); frame_read_success = False; break
-            current_frames_pil[port] = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        if not frame_read_success: continue
-
-        # --- Project previous head position (if tracking) ---
-        projected_heads_2d = {} # {port: [x, y]}
-        can_track = False
-        if tracked_person_3d_kps is not None:
-            prev_head_3d = tracked_person_3d_kps[head_kp_index] # Get previous head 3D pos
-            if prev_head_3d is not None and not np.isnan(prev_head_3d).any():
-                can_track = True # We have a valid previous position
-                for port in common_ports:
-                    cam_idx = port_to_cam_index[port]
-                    P = projection_matrices[cam_idx]
-                    proj_2d = project_3d_to_2d(prev_head_3d, P)
-                    if proj_2d is not None:
-                        projected_heads_2d[port] = proj_2d
-                    # else: print(f"Debug: Projection failed for port {port}") # Optional
-
-        # --- Detect, Estimate Poses, and Store Per View ---
-        view_results = {} # {port: [person0_kps(17,3), person1_kps(17,3), ...]}
-        any_persons_detected_this_sync = False
-        for port in common_ports:
-            image = current_frames_pil[port]
-            plot_this_frame = False; debug_prefix = None # Or your debug conditions
-            if plot_this_frame: debug_prefix = os.path.join(os.path.dirname(output_path), "debug_poses", f"sync_{sync_index}_port_{port}")
-
-            person_boxes_voc, person_boxes_coco, person_scores = detect_persons(image, person_processor, person_model, device, person_confidence)
-            if person_boxes_coco.size == 0: view_results[port] = []; continue
-
-            all_keypoints_2d, all_keypoint_scores = estimate_poses(image, person_boxes_coco, pose_processor, pose_model, device, debug_plot=plot_this_frame, debug_save_prefix=debug_prefix)
-
-            persons_in_view = []
-            if len(all_keypoints_2d) == len(all_keypoint_scores):
-                for person_idx in range(len(all_keypoints_2d)):
-                    kps_2d, scores_2d = all_keypoints_2d[person_idx], all_keypoint_scores[person_idx]
-                    valid_kps_view = []; num_kps = kps_2d.shape[0] if isinstance(kps_2d, np.ndarray) else 0
-                    if num_kps > 0 and num_kps == scores_2d.shape[0]:
-                        for kp_idx in range(num_kps):
-                            kp, score = kps_2d[kp_idx], scores_2d[kp_idx]
-                            if score >= keypoint_confidence: valid_kps_view.append([kp[0], kp[1], score])
-                            else: valid_kps_view.append([np.nan, np.nan, score])
-                    else: valid_kps_view = [[np.nan, np.nan, 0.0]] * 17 # Placeholder if shapes mismatch or invalid
-                    persons_in_view.append(np.array(valid_kps_view))
-                any_persons_detected_this_sync = True
-            else: print(f"Warn: Mismatch len kps/scores p{port}"); persons_in_view = []
-            view_results[port] = persons_in_view
-
-        # --- Identify Person to Triangulate ---
-        person_idx_to_triangulate = {} # {port: person_idx_in_that_port}
-        found_match_for_tracking = False
-
-        if can_track and any_persons_detected_this_sync:
-            # --- Attempt to match tracked person ---
-            candidate_distances = {} # { person_idx_in_ref_view : total_distance }
-            ref_port = common_ports[0] # Choose a reference port
-
-            if ref_port in projected_heads_2d and ref_port in view_results and view_results[ref_port]:
-                projected_ref_head = projected_heads_2d[ref_port]
-                # Find the closest person in the reference view
-                min_dist_ref = float('inf')
-                best_person_idx_ref = -1
-                for p_idx, person_kps in enumerate(view_results[ref_port]):
-                    head_2d = person_kps[head_kp_index, :2] # Get head XY
-                    if not np.isnan(head_2d).any():
-                        dist = math.dist(head_2d, projected_ref_head)
-                        if dist < min_dist_ref:
-                            min_dist_ref = dist
-                            best_person_idx_ref = p_idx
-
-                # Check if the closest match is within threshold
-                if best_person_idx_ref != -1 and min_dist_ref < tracking_max_2d_dist:
-                    # Assume this is the tracked person
-                    found_match_for_tracking = True
-                    # Gather this person's index from all views (simplistic: use same index)
-                    # A more robust method would check distances in other views too
-                    for p in common_ports:
-                        # Check if view has enough people and the specific head is valid
-                        if p in view_results and len(view_results[p]) > best_person_idx_ref:
-                             candidate_head = view_results[p][best_person_idx_ref][head_kp_index, :2]
-                             if not np.isnan(candidate_head).any():
-                                  person_idx_to_triangulate[p] = best_person_idx_ref
-                        # else: print(f"Debug: Cannot get kps for person {best_person_idx_ref} in port {p}")
-
-        if not found_match_for_tracking and any_persons_detected_this_sync:
-            # --- Attempt to initialize track with person 0 ---
-            # print(f"Debug: No track or lost track. Attempting to initialize with Person 0. Sync {sync_index}")
-            tracked_person_3d_kps = None # Ensure previous track is cleared
-            can_initialize = False
-            for p in common_ports:
-                if p in view_results and view_results[p]: # Check if view has any person
-                     head_0 = view_results[p][0][head_kp_index, :2]
-                     if not np.isnan(head_0).any():
-                          person_idx_to_triangulate[p] = 0 # Use index 0
-                          can_initialize = True # Mark that we can try initializing
-                     # else: print(f"Debug: Person 0 head is NaN in port {p}")
-            if not can_initialize:
-                person_idx_to_triangulate = {} # Cannot initialize if no valid person 0 head found
-
-
-        # --- Triangulation ---
-        keypoints_3d = None # Reset for this sync index
-        if len(person_idx_to_triangulate) >= 2: # Need data from at least 2 views
-            kps_to_triangulate_dict = {}
-            num_valid_views_for_tri = 0
-            for port, p_idx in person_idx_to_triangulate.items():
-                 # Double check data exists and is valid shape (52, 3)
-                 if port in view_results and len(view_results[port]) > p_idx:
-                      kps = view_results[port][p_idx]
-                      if isinstance(kps, np.ndarray) and kps.shape == (52, 3):
-                           kps_to_triangulate_dict[port] = kps
-                           num_valid_views_for_tri += 1
-                      # else: print(f"Debug: Invalid kps format for port {port}, person {p_idx}")
-                 # else: print(f"Debug: Data missing for port {port}, person {p_idx}")
-
-
-            if num_valid_views_for_tri >= 2:
-                # print(f"Debug: Attempting triangulation s{sync_index} with {num_valid_views_for_tri} views. Indices: {person_idx_to_triangulate}")
-                keypoints_3d = triangulate_keypoints(
-                    kps_to_triangulate_dict, port_to_cam_index, camera_params, projection_matrices
-                )
-
-        # --- Update Track and Store Results ---
-        if keypoints_3d and any(kp is not None for kp in keypoints_3d):
-            # Successfully triangulated
-            tracked_person_3d_kps = keypoints_3d # Update track state for next frame
-            # print(f"Debug: Track UPDATED s{sync_index}")
-
-            kps_3d_list = [[np.nan]*3 if kp is None else kp.tolist() for kp in keypoints_3d]
-            results_3d.append({
-                'sync_index': sync_index,
-                'person_id': tracked_person_id_counter, # Use the consistent tracked ID
-                'keypoints_3d': kps_3d_list
-            })
-        else:
-            # Triangulation failed or no match found
-            if tracked_person_3d_kps is not None:
-                 print(f"Info: Track lost at sync_index {sync_index}")
-            tracked_person_3d_kps = None # Lose track
-            # Do not increment tracked_person_id_counter if track is lost/not found
-
-        # Increment ID counter ONLY when starting a new track
-        if found_match_for_tracking == False and tracked_person_3d_kps is not None:
-             # This means we just successfully initialized
-             tracked_person_id_counter += 1
-
-
-    # --- 8. Cleanup and Save Results ---
-    print("\nReleasing video captures...")
-    [cap.release() for cap in caps.values()]
-    end_time = time.time()
-    print(f"Processing finished in {end_time - start_time:.2f} seconds.")
-
-    if not results_3d:
-        print("No 3D poses were successfully generated.")
-        return
-
-    print(f"Generated 3D poses for {len(results_3d)} tracked person instances.")
-
-    # --- Define output filenames ---
-    output_csv_path = output_path # Use the provided path for CSV
-    output_pickle_path = os.path.splitext(output_path)[0] + ".pkl"
-
-    # --- 1. Save as Pickle (Compact Python Object) ---
-    print(f"Saving raw results to Pickle file: {output_pickle_path}...")
-    try:
-        with open(output_pickle_path, 'wb') as f_pkl:
-            pickle.dump(results_3d, f_pkl)
-        print("Pickle file saved successfully.")
-    except Exception as e:
-        print(f"Error saving results to pickle: {e}")
-
-    # --- 2. Prepare and Save as Wide CSV ---
-    print(f"Preparing data for wide CSV format...")
-    csv_rows = []
-    expected_num_kps = SynthPoseMarkers.num_markers # Should be 52
-
-    for result in tqdm(results_3d, desc="Formatting CSV Data"):
-        row_data = {
-            'sync_index': result['sync_index'],
-            'person_id': int(result['person_id']) # Ensure integer ID
-        }
-
-        kps_list = result['keypoints_3d']
-
-        # Check if the keypoint list has the expected length
-        if len(kps_list) != expected_num_kps:
-            print(f"Warning: Sync {result['sync_index']}, Person {result['person_id']} has {len(kps_list)} keypoints, expected {expected_num_kps}. Padding with NaNs.")
-            # Pad with NaNs if too short, truncate if too long (or handle differently)
-            kps_list.extend([[np.nan, np.nan, np.nan]] * (expected_num_kps - len(kps_list)))
-            kps_list = kps_list[:expected_num_kps]
-
-        for kp_idx in range(expected_num_kps):
-            marker_name = SynthPoseMarkers.markers.get(kp_idx, f"KP_{kp_idx}") # Get marker name
-            coords = kps_list[kp_idx] # Should be [x, y, z] or [nan, nan, nan]
-
-            # Ensure coords is a list/tuple of 3 elements, handle None if necessary
-            if coords is None or not isinstance(coords, (list, tuple)) or len(coords) != 3:
-                 x, y, z = np.nan, np.nan, np.nan
-            else:
-                 x, y, z = coords[0], coords[1], coords[2]
-
-            row_data[f"{marker_name}_X"] = x
-            row_data[f"{marker_name}_Y"] = y
-            row_data[f"{marker_name}_Z"] = z
-
-        csv_rows.append(row_data)
-
-    if not csv_rows:
-         print("No valid data formatted for CSV.")
-         return
-
-    print(f"Saving formatted results to CSV file: {output_csv_path}...")
-    try:
-        results_df_wide = pd.DataFrame(csv_rows)
-        # Define column order (optional but good practice)
-        cols = ['sync_index', 'person_id']
-        for i in range(expected_num_kps):
-            marker_name = SynthPoseMarkers.markers.get(i, f"KP_{i}")
-            cols.extend([f"{marker_name}_X", f"{marker_name}_Y", f"{marker_name}_Z"])
-        # Reindex DataFrame to ensure columns are in order, adding missing ones if any
-        results_df_wide = results_df_wide.reindex(columns=cols)
-
-        results_df_wide.to_csv(output_csv_path, index=False, float_format='%.4f') # Format floats
-        print("CSV file saved successfully.")
-
-    except Exception as e:
-        print(f"Error saving results to CSV: {e}")
-
 
 def read_posetrack_csv(csv_path):
     """
@@ -2327,7 +1348,7 @@ def batch_process_subfolders(base_dir, overwrite_tracked_files = False, **kwargs
         
         # try:
         # Process this subfolder
-        process_synced_mwc_frames_multi_person(
+        process_synced_mwc_frames_multi_person_perf(
             frame_history_csv_path=frame_time_history_csv,
             calibration_path=calibration_path,
             video_dir=subfolder_path,
@@ -2362,10 +1383,9 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    process_synced_mwc_frames(
+    process_synced_mwc_frames_multi_person_perf(
         frame_history_csv_path=args.csv_path, calibration_path=args.calibration_path, video_dir=args.video_dir,
         output_path=args.output_path, model_dir=args.model_dir, detector_dir=args.detector_dir,
         calib_type=args.calib_type, skip_sync_indices=args.skip, person_confidence=args.person_conf,
-        keypoint_confidence=args.keypoint_conf, device_name=args.device,
-        tracking_max_2d_dist=args.track_max_dist, head_kp_index=args.head_idx)
+        keypoint_confidence=args.keypoint_conf, device_name=args.device)
 

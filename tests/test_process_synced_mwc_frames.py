@@ -25,15 +25,8 @@ if __name__ == "__main__":
     parser.add_argument("--head_idx", type=int, default=0, help="Index of keypoint used for tracking (default: 0, Nose).")
 
     args = parser.parse_args()
-
-    # process_synced_mwc_frames(
-    #     frame_history_csv_path=args.csv_path, calibration_path=args.calibration_path, video_dir=args.video_dir,
-    #     output_path=args.output_path, model_dir=args.model_dir, detector_dir=args.detector_dir,
-    #     calib_type=args.calib_type, skip_sync_indices=args.skip, person_confidence=args.person_conf,
-    #     keypoint_confidence=args.keypoint_conf, device_name=args.device,
-    #     tracking_max_2d_dist=args.track_max_dist, head_kp_index=args.head_idx)
     
-    process_synced_mwc_frames_multi_person(frame_history_csv_path=args.csv_path, calibration_path=args.calibration_path, video_dir=args.video_dir,
+    process_synced_mwc_frames_multi_person_perf(frame_history_csv_path=args.csv_path, calibration_path=args.calibration_path, video_dir=args.video_dir,
         output_path=args.output_path, model_dir=args.model_dir, detector_dir=args.detector_dir,
         calib_type=args.calib_type, skip_sync_indices=args.skip, person_confidence=args.person_conf,
-        keypoint_confidence=args.keypoint_conf, device_name=args.device)#,batch_size=32)
+        keypoint_confidence=args.keypoint_conf, device_name=args.device)

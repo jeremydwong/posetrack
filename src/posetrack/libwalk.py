@@ -7,6 +7,26 @@ import pandas as pd
 from .pose_detector import SynthPoseMarkers
 from tkinter import Tk, filedialog
 
+import cv2
+   
+def extract_frames(input_file, output_file, n_frames):
+   cap = cv2.VideoCapture(input_file)
+   fourcc = cv2.VideoWriter.fourcc(*'mp4v')  # Note the dot instead of underscore
+   fps = cap.get(cv2.CAP_PROP_FPS)
+   width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+   height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+   
+   out = cv2.VideoWriter(output_file, fourcc, fps, (width, height))
+   
+   for i in range(n_frames):
+       ret, frame = cap.read()
+       if not ret:
+           break
+       out.write(frame)
+   
+   cap.release()
+   out.release()
+
 def map_synthpose_to_mediapipe(df):
     """
     Maps synthpose marker data to Mediapipe format.

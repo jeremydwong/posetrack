@@ -89,7 +89,7 @@ def load_models(detect_path=LOCAL_DET_DIR, pose_model_path=LOCAL_SP_DIR, device=
 def detect_persons(image, person_image_processor, person_model, device, confidence_threshold=0.3):
     """Drop-in replacement for RT-DETR using YOLO - same function signature"""
     
-    results = person_model(image, conf=confidence_threshold, half=True, classes=[0])  # class 0 = person
+    results = person_model(image, conf=confidence_threshold, half=True, classes=[0], verbose = False)  # class 0 = person
         # imgsz=640,        # Input size (preprocessing)
     # conf=0.25,        # Confidence threshold (postprocessing)
     # iou=0.45,         # NMS IoU threshold (postprocessing)
@@ -321,15 +321,15 @@ def detect_persons_rdetr(images, person_image_processor, person_model, device, c
         target_sizes = torch.tensor([img.size[::-1] for img in batch_images])
         
         # DEBUG: Check if we're actually batching
-        print(f"DEBUG: Input tensor shape: {inputs['pixel_values'].shape}")
-        print(f"DEBUG: Expected batch dimension: {actual_batch_size}")
+        # print(f"DEBUG: Input tensor shape: {inputs['pixel_values'].shape}")
+        # print(f"DEBUG: Expected batch dimension: {actual_batch_size}")
         
         with torch.no_grad():
             outputs = person_model(**inputs)
         
         batch_time = time.time() - start_time
-        print(f"DEBUG: Batch of {actual_batch_size} images time: {batch_time:.4f}s")
-        print(f"DEBUG: Time per image in batch: {batch_time/actual_batch_size:.4f}s")
+        # print(f"DEBUG: Batch of {actual_batch_size} images time: {batch_time:.4f}s")
+        # print(f"DEBUG: Time per image in batch: {batch_time/actual_batch_size:.4f}s")
         
         # Post-process batch results
         results = person_image_processor.post_process_object_detection(
@@ -390,8 +390,8 @@ def detect_persons_batch_rtdetr(images, person_image_processor, person_model, de
         results = person_model(batch_images, conf=confidence_threshold, half=True,classes=[0],batch=len(batch_images))
         
         batch_time = time.time() - start_time
-        print(f"DEBUG: Batch of {actual_batch_size} images time: {batch_time:.4f}s")
-        print(f"DEBUG: Time per image in batch: {batch_time/actual_batch_size:.4f}s")
+        # print(f"DEBUG: Batch of {actual_batch_size} images time: {batch_time:.4f}s")
+        # print(f"DEBUG: Time per image in batch: {batch_time/actual_batch_size:.4f}s")
         
         # Process each image result in the batch
         for result in results:
@@ -417,11 +417,11 @@ def detect_persons_batch(images, person_image_processor, person_model, device, c
     batch_results = []
     
     # DEBUG: Time single image processing
-    if len(images) > 0:
-        start_time = time.perf_counter()
-        single_results = person_model(images[0], conf=confidence_threshold, half=True, classes=[0])
-        single_time = time.perf_counter() - start_time
-        print(f"DEBUG: Single image processing time: {single_time:.4f}s")
+    # if len(images) > 0:
+    #     start_time = time.perf_counter()
+    #     single_results = person_model(images[0], conf=confidence_threshold, half=True, classes=[0])
+    #     single_time = time.perf_counter() - start_time
+    #     # print(f"DEBUG: Single image processing time: {single_time:.4f}s")
     
     # Process images in batches
     for i in range(0, len(images), batch_size):
@@ -430,10 +430,10 @@ def detect_persons_batch(images, person_image_processor, person_model, device, c
         
         # DEBUG: Time batch processing
         start_time = time.perf_counter()
-        results = person_model(batch_images, conf=confidence_threshold, half=True, classes=[0], batch=len(batch_images))
+        results = person_model(batch_images, conf=confidence_threshold, half=True, classes=[0], batch=len(batch_images), verbose=False)
         batch_time = time.perf_counter() - start_time
-        print(f"DEBUG: Batch of {actual_batch_size} images time: {batch_time:.4f}s")
-        print(f"DEBUG: Time per image in batch: {batch_time/actual_batch_size:.4f}s")
+        # print(f"DEBUG: Batch of {actual_batch_size} images time: {batch_time:.4f}s")
+        # print(f"DEBUG: Time per image in batch: {batch_time/actual_batch_size:.4f}s")
         
         # Process each image result in the batch
         for result in results:
@@ -584,7 +584,7 @@ if __name__ == "__main__":
     person_boxes_voc, person_boxes_coco, person_scores = detect_persons(
         image, person_processor, person_model, device
     )
-    print(f"Detected {len(person_boxes_voc)} persons.")
+    # print(f"Detected {len(person_boxes_voc)} persons.")
 
     # Estimate poses
     all_keypoints, all_keypoint_scores = estimate_poses(
