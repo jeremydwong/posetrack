@@ -2,15 +2,18 @@
 # 2025-07-17: batch-processing a synthpose run. 
 import posetrack as pt 
 import os
+import time
 #%%
-base_dir = '/Users/jeremy/Library/CloudStorage/OneDrive-UniversityofCalgary/Project 2025 Older Adult distributed movement assessments/data/2025-07-25/recordings_garnetm'
-overwrite = False
+base_dir = '/Users/jeremy/Library/CloudStorage/OneDrive-UniversityofCalgary/Project 2025 Older Adult distributed movement assessments/data/2025-07-25/recordings_carylh_newsynth'
+overwrite = True #If True: we will redo existing analyses.
 #%%
+start_time = time.perf_counter()
 pt.batch_process_subfolders(base_dir = base_dir, overwrite_tracked_files = overwrite, 
                             person_confidence=0.1, keypoint_confidence=0.1, device_name="mps",verbose_debug=False, 
-                            override_views_used=[(0,2)])
-
-#pt.batch_project_poses_to_video(base_dir)
+                            override_views_used=[(0,2)], batch_size=32)
+single_time = time.time() - start_time
+print(f"processed whole folder in {single_time:.2f} s.")
+pt.batch_project_poses_to_video(base_dir)
 
 # base_dir = '/Users/jeremy/Library/]CloudStorage/OneDrive-UniversityofCalgary/Project 2025 Older Adult distributed movement assessments/data/2025-07-10/'
 # which_trial = 'recording_linda_balance4_v3'
