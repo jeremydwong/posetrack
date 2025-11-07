@@ -321,7 +321,7 @@ def show_multi_person_results(results_directory, output_plot_path=None, verbose 
         
         # Plot the active frames
         plt.scatter(sync_indices, [y_pos] * len(sync_indices), 
-                   color=colors[i], alpha=0.7, s=20, label=f'Person {person_id}')
+                   color=colors[i], alpha=0.5, s=20, label=f'Person {person_id}')
         
         # Add text annotation
         if len(sync_indices) > 0:

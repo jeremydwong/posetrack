@@ -10,7 +10,7 @@ overwrite = True #If True: we will redo existing analyses.
 start_time = time.perf_counter()
 pt.batch_process_subfolders(base_dir = base_dir, overwrite_tracked_files = overwrite, 
                             person_confidence=0.1, keypoint_confidence=0.1, device_name="mps",verbose_debug=False, 
-                            override_views_used=[(0,2)], batch_size=32)
+                            override_views_used=[(0,2)], batch_size=32, track_frames_til_lost_patience=60)
 single_time = time.time() - start_time
 print(f"processed whole folder in {single_time:.2f} s.")
 pt.batch_project_poses_to_video(base_dir)
